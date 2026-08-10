@@ -47,6 +47,12 @@ allow = [
     "Ubuntu-font-1.0",   # epaint_default_fonts
 ]
 
+# Deliberately absent: MPL-2.0. The audio library's default decoder is under it,
+# and this gate caught that before it shipped. It is weak copyleft and would
+# probably have been fine, but a permissively licensed decoder existed, so the
+# question did not have to be answered at all. Adding a line here is a decision;
+# not adding one is also a decision, and this is the record of that.
+
 # Some crates offer a choice that includes a copyleft license. Taking the
 # permissive side is the whole point of the choice being offered, and recording
 # it here makes the decision visible rather than implicit.

@@ -34,8 +34,13 @@ const WINDOWS_EPOCH_OFFSET: u64 = 11_644_473_600;
 pub const DEFAULT_VOICE: &str = "en-US-AndrewNeural";
 
 /// Audio as the service returns it.
+///
+/// Compressed, because it is the only format this service reliably returns -
+/// asking for uncompressed produced no audio at all. The decoder is chosen for
+/// its license: the one the audio library reaches for by default is weak
+/// copyleft, which the license gate caught before it could ship.
 pub struct Speech {
-    pub mp3: Vec<u8>,
+    pub audio: Vec<u8>,
 }
 
 /// A token the service checks on every connection.
@@ -125,10 +130,10 @@ fn is_audio(headers: &[u8]) -> bool {
 /// Blocking, and called from a thread set aside for it. Speaking is the one
 /// thing Ward does that takes as long as it takes, and hurrying the caller
 /// along would only mean starting the next line over the top of this one.
-pub fn play(mp3: Vec<u8>) -> Result<()> {
+pub fn play(audio: Vec<u8>) -> Result<()> {
     let device = rodio::DeviceSinkBuilder::open_default_sink().context("no audio output device")?;
 
-    let player = rodio::play(device.mixer(), std::io::Cursor::new(mp3))
+    let player = rodio::play(device.mixer(), std::io::Cursor::new(audio))
         .context("could not decode the speech")?;
 
     player.sleep_until_end();
@@ -215,15 +220,15 @@ pub async fn synthesize(text: &str, voice: &str, rate: &str) -> Result<Speech> {
         .await
         .context("could not send the text to be spoken")?;
 
-    let mut mp3 = Vec::new();
+    let mut audio = Vec::new();
 
     while let Some(message) = socket.next().await {
         match message.map_err(|e| anyhow!("the voice connection dropped: {e}"))? {
             Message::Binary(frame) => {
-                if let Some((_, audio)) =
+                if let Some((_, chunk_audio)) =
                     split_frame(&frame).filter(|(headers, _)| is_audio(headers))
                 {
-                    mp3.extend_from_slice(audio);
+                    audio.extend_from_slice(chunk_audio);
                 }
             }
             Message::Text(text) => {
@@ -238,14 +243,14 @@ pub async fn synthesize(text: &str, voice: &str, rate: &str) -> Result<Speech> {
 
     let _ = socket.close(None).await;
 
-    if mp3.is_empty() {
+    if audio.is_empty() {
         return Err(anyhow!(
             "the voice service returned no audio. It may have changed; \
              Ward will keep answering in text."
         ));
     }
 
-    Ok(Speech { mp3 })
+    Ok(Speech { audio })
 }
 
 #[cfg(test)]
@@ -343,17 +348,17 @@ mod tests {
             .expect("synthesis failed");
 
         assert!(
-            speech.mp3.len() > 1000,
+            speech.audio.len() > 1000,
             "suspiciously little audio: {} bytes",
-            speech.mp3.len()
+            speech.audio.len()
         );
 
-        // An MPEG audio frame begins with eleven set bits, or the stream opens
+        // An MPEG audio frame opens with eleven set bits, or the stream begins
         // with an identification tag. Anything else means what came back was
         // not audio, whatever its length.
-        let head = &speech.mp3[..3];
+        let head = &speech.audio[..3];
         let framed = head[0] == 0xFF && (head[1] & 0xE0) == 0xE0;
-        let tagged = &head[..3] == b"ID3";
+        let tagged = head == b"ID3";
 
         assert!(framed || tagged, "not audio: {head:02X?}");
     }
@@ -371,7 +376,7 @@ mod tests {
         .await
         .expect("synthesis failed");
 
-        tokio::task::spawn_blocking(move || play(speech.mp3))
+        tokio::task::spawn_blocking(move || play(speech.audio))
             .await
             .expect("playback thread failed")
             .expect("playback failed");

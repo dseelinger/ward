@@ -382,13 +382,14 @@ impl Ward {
                     tracing::info!(
                         target: "ward::voice",
                         ms = started.elapsed().as_millis() as u64,
-                        bytes = speech.mp3.len(),
+                        bytes = speech.audio.len(),
                         "synthesized"
                     );
 
                     // Playback blocks for as long as the words take, so it goes
                     // somewhere that is allowed to block.
-                    let played = tokio::task::spawn_blocking(move || voice::play(speech.mp3)).await;
+                    let played =
+                        tokio::task::spawn_blocking(move || voice::play(speech.audio)).await;
 
                     if let Ok(Err(e)) = played {
                         tracing::warn!(target: "ward::voice", error = %e, "could not play");

@@ -1,0 +1,17 @@
+[package]
+name = "ward"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A voice companion for Elite Dangerous."
+repository = "https://github.com/dseelinger/ward"
+
+[dependencies]
+anyhow = "1.0.104"
+eframe = "0.36.1"
+futures-util = "0.3.33"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "http2", "default-tls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }

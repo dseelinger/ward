@@ -41,3 +41,30 @@ jobs:
         env:
           WARD_BANNED_NAMES: ${{ runner.temp }}/banned-names.txt
         run: sh check.sh
+
+  # Windows, because ward talks to the Windows data protection API directly and
+  # so does not compile anywhere else. Running this on Linux would not be a
+  # cheaper version of the same check; it would be a different one that cannot
+  # pass.
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  # Licences are an allowlist: anything not named in deny.toml fails. This
+  # reads dependency metadata rather than building, so it does not need Windows.
+  licences:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses

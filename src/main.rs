@@ -37,8 +37,8 @@ fn data_dir() -> PathBuf {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([720.0, 560.0])
-            .with_min_inner_size([420.0, 320.0])
+            .with_inner_size([980.0, 720.0])
+            .with_min_inner_size([520.0, 400.0])
             .with_title("Ward"),
         ..Default::default()
     };
@@ -46,7 +46,18 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "ward",
         options,
-        Box::new(|_cc| Ok(Box::new(Ward::new()) as Box<dyn eframe::App>)),
+        Box::new(|cc| {
+            // The toolkit's defaults are sized for reading at a desk with full
+            // attention. Ward is read at a glance, mid-flight, and later at
+            // distance through a headset, so it starts larger.
+            //
+            // This multiplies the display's own scale factor rather than
+            // replacing it: a Commander who has already told Windows to render
+            // at 150% still gets 150%, and this on top. Making it adjustable is
+            // a separate piece of work.
+            cc.egui_ctx.set_zoom_factor(1.35);
+            Ok(Box::new(Ward::new()) as Box<dyn eframe::App>)
+        }),
     )
 }
 

@@ -18,6 +18,7 @@ mod diag;
 mod secrets;
 mod speech;
 mod sse;
+mod voice;
 
 use anthropic::{Client, Event, Message, Role};
 use std::sync::Arc;
@@ -25,7 +26,7 @@ use std::sync::Arc;
 use config::{Settings, State};
 use eframe::egui;
 use serde_json::json;
-use speech::{Act, Arbiter, Register, Speaker};
+use speech::{Act, Arbiter, Body, Register, Speaker};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 fn main() -> eframe::Result<()> {
@@ -151,6 +152,10 @@ struct Ward {
     speech: Arbiter,
     /// When the current act started holding the caption.
     spoke_at: std::time::Duration,
+    /// Signals that speaking finished, so the stream can move on. Silence
+    /// falls back to the caption's own timing, which is what keeps a failure
+    /// to speak from also freezing what is on screen.
+    spoken: Option<UnboundedReceiver<()>>,
     window: egui::Vec2,
 }
 
@@ -214,6 +219,7 @@ impl Ward {
             using: None,
             speech: Arbiter::default(),
             spoke_at: std::time::Duration::ZERO,
+            spoken: None,
             window: egui::Vec2::new(980.0, 720.0),
         }
     }
@@ -253,6 +259,56 @@ impl Ward {
             client.stream(&history, tx).await;
             // The window is not otherwise waiting on anything, so nudge it or
             // the last fragment sits in the channel until the mouse moves.
+            ctx.request_repaint();
+        });
+    }
+
+    /// Speaks an act, if it has words and a voice can be had.
+    ///
+    /// Failure here costs the voice and nothing else. The answer is already on
+    /// screen, the caption still advances on its own timing, and the reason is
+    /// written down. A companion that goes quiet is worse than one that never
+    /// spoke, but a companion that stops working because it could not speak is
+    /// worse than both.
+    fn say(&mut self, act: &Act, ctx: &egui::Context) {
+        let Body::Text(text) = &act.body else {
+            return;
+        };
+
+        let text = text.clone();
+        let voice = self.settings.string("voice");
+        let rate = self.settings.string("speaking rate");
+        let ctx = ctx.clone();
+
+        let (tx, rx) = unbounded_channel();
+        self.spoken = Some(rx);
+
+        self.runtime.spawn(async move {
+            let started = std::time::Instant::now();
+
+            match voice::synthesize(&text, &voice, &rate).await {
+                Ok(speech) => {
+                    tracing::info!(
+                        target: "ward::voice",
+                        ms = started.elapsed().as_millis() as u64,
+                        bytes = speech.mp3.len(),
+                        "synthesized"
+                    );
+
+                    // Playback blocks for as long as the words take, so it goes
+                    // somewhere that is allowed to block.
+                    let played = tokio::task::spawn_blocking(move || voice::play(speech.mp3)).await;
+
+                    if let Ok(Err(e)) = played {
+                        tracing::warn!(target: "ward::voice", error = %e, "could not play");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(target: "ward::voice", error = %e, "could not speak");
+                }
+            }
+
+            let _ = tx.send(());
             ctx.request_repaint();
         });
     }
@@ -508,14 +564,27 @@ impl eframe::App for Ward {
         // over this pacing - the act ends when the words do - and nothing above
         // here changes.
         let now = diag::since_start();
+
+        // Speaking finished, so the stream may move on.
+        if self.spoken.as_mut().is_some_and(|rx| rx.try_recv().is_ok()) {
+            self.spoken = None;
+            self.speech.finished();
+        }
+
         match self.speech.speaking() {
-            Some(act) if now.saturating_sub(self.spoke_at) >= act.dwell() => {
+            // The caption's own timing is the backstop. If a voice is speaking
+            // it will say so first; if synthesis failed, this is what stops the
+            // caption sitting there forever.
+            Some(act)
+                if self.spoken.is_none() && now.saturating_sub(self.spoke_at) >= act.dwell() =>
+            {
                 self.speech.finished();
             }
             Some(_) => {}
             None => {
-                if self.speech.next(now).is_some() {
+                if let Some(act) = self.speech.next(now) {
                     self.spoke_at = now;
+                    self.say(&act, ui.ctx());
                 }
             }
         }

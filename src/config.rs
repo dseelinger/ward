@@ -59,6 +59,11 @@ fn default_setting(key: &str) -> Option<Value> {
         // adjusting it. Multiplies the display's own scale factor rather than
         // replacing it.
         "text size" => Some(json!(1.35)),
+        "voice" => Some(json!(crate::voice::DEFAULT_VOICE)),
+        // Percentage against the voice's natural pace, in the form the service
+        // expects. Never a bare multiplier: providers disagree about what
+        // range they accept, and a number that suits one clips against another.
+        "speaking rate" => Some(json!("+0%")),
         _ => None,
     }
 }

@@ -11,6 +11,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod anthropic;
+mod diag;
 mod secrets;
 mod sse;
 
@@ -35,6 +36,26 @@ fn data_dir() -> PathBuf {
 }
 
 fn main() -> eframe::Result<()> {
+    let data_dir = data_dir();
+
+    // Logging failing is not a reason for Ward not to run. Say so on the
+    // console and carry on without it, rather than refusing to start over a
+    // diagnostic.
+    let _log = match diag::init(&data_dir) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            eprintln!("ward: could not start logging: {e:#}");
+            None
+        }
+    };
+
+    tracing::info!(
+        target: "ward::app",
+        version = env!("CARGO_PKG_VERSION"),
+        data_dir = %data_dir.display(),
+        "starting"
+    );
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([980.0, 720.0])
@@ -95,24 +116,33 @@ impl Ward {
         let path = secrets::key_path(&data_dir());
 
         let (screen, client) = match secrets::load(&path) {
-            Ok(Some(key)) => (Screen::Talking, Some(Client::new(key))),
-            Ok(None) => (
-                Screen::NeedKey {
-                    entry: String::new(),
-                    problem: None,
-                },
-                None,
-            ),
+            Ok(Some(key)) => {
+                tracing::info!(target: "ward::secrets", "stored key loaded");
+                (Screen::Talking, Some(Client::new(key)))
+            }
+            Ok(None) => {
+                tracing::info!(target: "ward::secrets", "no key stored yet");
+                (
+                    Screen::NeedKey {
+                        entry: String::new(),
+                        problem: None,
+                    },
+                    None,
+                )
+            }
             // A stored key that will not decrypt is the ordinary consequence of
             // copying the data folder between machines or accounts. Say so and
             // offer the field again rather than refusing to start.
-            Err(e) => (
-                Screen::NeedKey {
-                    entry: String::new(),
-                    problem: Some(e.to_string()),
-                },
-                None,
-            ),
+            Err(e) => {
+                tracing::warn!(target: "ward::secrets", error = %e, "stored key unreadable");
+                (
+                    Screen::NeedKey {
+                        entry: String::new(),
+                        problem: Some(e.to_string()),
+                    },
+                    None,
+                )
+            }
         };
 
         Self {
@@ -153,6 +183,8 @@ impl Ward {
         let (tx, rx): (UnboundedSender<Event>, UnboundedReceiver<Event>) = unbounded_channel();
         self.events = Some(rx);
 
+        tracing::info!(target: "ward::turn", messages = self.history.len(), "turn started");
+
         let history = self.history.clone();
         let ctx = ctx.clone();
 
@@ -190,6 +222,12 @@ impl Ward {
                     } else if text.trim().is_empty() {
                         self.problem = Some("The reply came back empty.".to_string());
                     } else {
+                        tracing::info!(
+                            target: "ward::turn",
+                            chars = text.len(),
+                            stop_reason = stop_reason.as_deref().unwrap_or("none"),
+                            "turn finished"
+                        );
                         self.history.push(Message {
                             role: Role::Assistant,
                             text,
@@ -199,6 +237,7 @@ impl Ward {
                     finished = true;
                 }
                 Event::Failed(message) => {
+                    tracing::warn!(target: "ward::turn", error = %message, "turn failed");
                     self.problem = Some(message);
                     // Drop the partial reply. Keeping it would leave a fragment
                     // on screen that looks like an answer and is not one.
@@ -256,11 +295,15 @@ impl Ward {
 
             match secrets::store(&secrets::key_path(&data_dir()), &key) {
                 Ok(()) => {
+                    tracing::info!(target: "ward::secrets", "key stored");
                     self.client = Some(Client::new(key));
                     self.screen = Screen::Talking;
                     return;
                 }
-                Err(e) => problem = Some(e.to_string()),
+                Err(e) => {
+                    tracing::error!(target: "ward::secrets", error = %e, "could not store key");
+                    problem = Some(e.to_string());
+                }
             }
         }
 

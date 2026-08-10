@@ -64,6 +64,19 @@ pub struct Client {
     model: String,
 }
 
+/// Written by hand so the key cannot be printed. Deriving `Debug` here would
+/// put it into the first error message that formatted a `Client`, and into
+/// whatever file that message landed in. Redaction is a safety net for what
+/// leaks by accident; this is simply not having the accident available.
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("model", &self.model)
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
+}
+
 impl Client {
     pub fn new(api_key: String) -> Self {
         Self {
@@ -86,6 +99,15 @@ impl Client {
     }
 
     async fn stream_inner(&self, history: &[Message], out: &UnboundedSender<Event>) -> Result<()> {
+        let started = std::time::Instant::now();
+
+        tracing::debug!(
+            target: "ward::model",
+            model = %self.model,
+            messages = history.len(),
+            "requesting"
+        );
+
         let body = Request {
             model: &self.model,
             max_tokens: MAX_TOKENS,
@@ -120,8 +142,24 @@ impl Client {
 
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
-            return Err(anyhow!("{}", explain(status, &detail)));
+            let explained = explain(status, &detail);
+            tracing::warn!(
+                target: "ward::model",
+                status = status.as_u16(),
+                error = %explained,
+                "request rejected"
+            );
+            return Err(anyhow!("{explained}"));
         }
+
+        // Time to first byte is the number that decides whether a spoken reply
+        // feels like conversation, so it is measured from the first turn
+        // rather than added once it becomes a problem.
+        tracing::debug!(
+            target: "ward::model",
+            ms = started.elapsed().as_millis() as u64,
+            "response opened"
+        );
 
         let mut parser = sse::Parser::new();
         let mut stream = response.bytes_stream();
@@ -146,6 +184,13 @@ impl Client {
                 }
             }
         }
+
+        tracing::info!(
+            target: "ward::model",
+            ms = started.elapsed().as_millis() as u64,
+            stop_reason = stop_reason.as_deref().unwrap_or("none"),
+            "reply complete"
+        );
 
         let _ = out.send(Event::Done { stop_reason });
 
@@ -341,6 +386,22 @@ mod tests {
     fn an_unparseable_error_body_still_produces_a_message() {
         let msg = explain(reqwest::StatusCode::BAD_GATEWAY, "<html>gateway</html>");
         assert!(msg.contains("not something you did"), "got: {msg}");
+    }
+
+    #[test]
+    fn the_api_key_cannot_be_printed() {
+        // Deriving Debug on Client would put the key into the first error
+        // message that formatted one, and from there into a log file. This
+        // fails the moment somebody replaces the hand-written impl with a
+        // derive.
+        let client = Client::new("sk-ant-secret-value-do-not-log".to_string());
+        let printed = format!("{client:?}");
+
+        assert!(
+            !printed.contains("sk-ant-secret-value"),
+            "leaked: {printed}"
+        );
+        assert!(printed.contains("redacted"), "got: {printed}");
     }
 
     #[test]

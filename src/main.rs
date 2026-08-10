@@ -15,6 +15,7 @@ mod capabilities;
 mod capability;
 mod config;
 mod diag;
+mod journal;
 mod secrets;
 mod speech;
 mod sse;
@@ -146,6 +147,12 @@ struct Ward {
     problem: Option<String>,
     /// A capability currently running, so a pause has a reason on screen.
     using: Option<String>,
+    /// Follows the game's journal. Absent until a folder with one in it turns
+    /// up, and re-checked periodically, because Elite starts a new file every
+    /// session and may not be running when Ward is.
+    watcher: Option<journal::Watcher>,
+    situation: journal::Situation,
+    last_looked: std::time::Duration,
     /// Everything Ward emits goes through here. Nothing speaks yet; captions
     /// and the transcript already render off it, so when a voice arrives it
     /// attaches to the same stream rather than beside it.
@@ -217,6 +224,9 @@ impl Ward {
             events: None,
             problem: None,
             using: None,
+            watcher: None,
+            situation: journal::Situation::default(),
+            last_looked: std::time::Duration::ZERO,
             speech: Arbiter::default(),
             spoke_at: std::time::Duration::ZERO,
             spoken: None,
@@ -255,12 +265,80 @@ impl Ward {
         let history = self.history.clone();
         let ctx = ctx.clone();
 
+        let situation = self.situation.brief();
+
         self.runtime.spawn(async move {
-            client.stream(&history, tx).await;
+            client.stream(&history, situation, tx).await;
             // The window is not otherwise waiting on anything, so nudge it or
             // the last fragment sits in the channel until the mouse moves.
             ctx.request_repaint();
         });
+    }
+
+    /// Reads whatever the game has written since last time.
+    ///
+    /// Polled rather than watched, and not on every frame: the journal changes
+    /// a few times a minute at most, and reading a file sixty times a second to
+    /// find nothing is work nobody asked for.
+    fn read_journal(&mut self, now: std::time::Duration) {
+        if now.saturating_sub(self.last_looked) < std::time::Duration::from_millis(900) {
+            return;
+        }
+        self.last_looked = now;
+
+        let folder = std::path::PathBuf::from(self.settings.string("journal folder"));
+
+        // The game starts a new file every session, so the newest one is
+        // re-checked rather than chosen once at startup. Without this, Ward
+        // stops learning anything the moment the Commander restarts the game.
+        if let Some(newest) = journal::newest(&folder) {
+            let changed = self
+                .watcher
+                .as_ref()
+                .map(|w| w.path() != newest)
+                .unwrap_or(true);
+
+            if changed {
+                tracing::info!(
+                    target: "ward::journal",
+                    file = %newest.file_name().unwrap_or_default().to_string_lossy(),
+                    "following"
+                );
+                self.watcher = Some(journal::Watcher::new(newest));
+            }
+        }
+
+        let Some(watcher) = self.watcher.as_mut() else {
+            return;
+        };
+
+        let read = watcher.poll();
+
+        // The session so far builds state without being announced. Only what
+        // happened since Ward started looking is news.
+        for record in read.backlog.iter().chain(read.fresh.iter()) {
+            self.situation.absorb(record);
+        }
+
+        if !read.backlog.is_empty() {
+            tracing::info!(
+                target: "ward::journal",
+                events = read.backlog.len(),
+                "caught up on the session so far"
+            );
+        }
+
+        for record in &read.fresh {
+            // The game's own time for the event, not Ward's. Lining an event up
+            // against when the game says it happened is the whole point of
+            // reading the timestamp rather than stamping it on arrival.
+            tracing::debug!(
+                target: "ward::journal",
+                event = %record.event,
+                at = record.timestamp.map(|t| t.to_string()).unwrap_or_default(),
+                "observed"
+            );
+        }
     }
 
     /// Speaks an act, if it has words and a voice can be had.
@@ -564,6 +642,7 @@ impl eframe::App for Ward {
         // over this pacing - the act ends when the words do - and nothing above
         // here changes.
         let now = diag::since_start();
+        self.read_journal(now);
 
         // Speaking finished, so the stream may move on.
         if self.spoken.as_mut().is_some_and(|rx| rx.try_recv().is_ok()) {

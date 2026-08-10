@@ -64,8 +64,17 @@ fn default_setting(key: &str) -> Option<Value> {
         // expects. Never a bare multiplier: providers disagree about what
         // range they accept, and a number that suits one clips against another.
         "speaking rate" => Some(json!("+0%")),
+        // Where the game writes its journal. Resolved against the user profile
+        // rather than stored absolute, so a settings file never carries
+        // somebody's account name around in it.
+        "journal folder" => Some(json!(default_journal_folder())),
         _ => None,
     }
+}
+
+fn default_journal_folder() -> String {
+    let profile = std::env::var("USERPROFILE").unwrap_or_default();
+    format!(r"{profile}\Saved Games\Frontier Developments\Elite Dangerous")
 }
 
 /// What the Commander chose. Holds overrides only.

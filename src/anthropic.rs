@@ -108,8 +108,13 @@ impl Client {
     /// `Event::Failed` on the same channel as everything else, so a caller has
     /// exactly one place to watch and cannot leave the Commander staring at a
     /// half-finished reply with no explanation.
-    pub async fn stream(&self, history: &[Message], out: UnboundedSender<Event>) {
-        if let Err(e) = self.run_turn(history, &out).await {
+    pub async fn stream(
+        &self,
+        history: &[Message],
+        situation: String,
+        out: UnboundedSender<Event>,
+    ) {
+        if let Err(e) = self.run_turn(history, &situation, &out).await {
             let _ = out.send(Event::Failed(e.to_string()));
         }
     }
@@ -119,7 +124,12 @@ impl Client {
     /// A turn is not a request. If the model asks for a tool, Ward runs it,
     /// hands back the result and asks again — and all of that is still the one
     /// question the Commander asked. Only the final reply is theirs to read.
-    async fn run_turn(&self, history: &[Message], out: &UnboundedSender<Event>) -> Result<()> {
+    async fn run_turn(
+        &self,
+        history: &[Message],
+        situation: &str,
+        out: &UnboundedSender<Event>,
+    ) -> Result<()> {
         let started = std::time::Instant::now();
 
         let mut wire: Vec<WireMessage> = history
@@ -131,6 +141,23 @@ impl Client {
                 }],
             })
             .collect();
+
+        // Live state rides a trailing system message rather than being pasted
+        // onto the Commander's question. Two reasons, and both matter.
+        //
+        // It leaves the cached prefix untouched: editing the system prompt
+        // invalidates the whole conversation, while appending here does not.
+        //
+        // And it keeps the operator channel separate from the person's. Text
+        // arriving in a user turn is text the model may reasonably treat as
+        // something the Commander said; this is Ward telling the model what is
+        // true, which is a different kind of statement.
+        wire.push(WireMessage {
+            role: "system",
+            content: vec![Block::Text {
+                text: format!("Current situation, from the game's own journal. {situation}"),
+            }],
+        });
 
         for round in 0..=MAX_TOOL_ROUNDS {
             let collected = self.request(&wire, out).await?;

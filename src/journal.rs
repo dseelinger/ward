@@ -393,7 +393,7 @@ mod tests {
             .append(true)
             .open(&path)
             .unwrap();
-        write!(file, "ocked\"}}\n").unwrap();
+        writeln!(file, "ocked\"}}").unwrap();
 
         let after = watcher.poll();
         assert_eq!(after.fresh.len(), 1);

@@ -71,6 +71,12 @@ impl Register {
 /// Cues ride this stream rather than a parallel one, so that ducking,
 /// interruption and priority apply to them without a second mechanism keeping
 /// step with the first.
+///
+/// Still unused, and the listening cue is why it is worth being careful here.
+/// The key that starts a turn is the same key that cuts one short, so a press
+/// has to be understood before it can be answered with a sound: a cue fired on
+/// the interrupting press would be Ward making a noise at the moment it was
+/// told to be quiet. Ward runs without one for now, deliberately.
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Body {

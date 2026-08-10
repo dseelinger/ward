@@ -16,6 +16,7 @@ mod capability;
 mod config;
 mod diag;
 mod secrets;
+mod speech;
 mod sse;
 
 use anthropic::{Client, Event, Message, Role};
@@ -24,6 +25,7 @@ use std::sync::Arc;
 use config::{Settings, State};
 use eframe::egui;
 use serde_json::json;
+use speech::{Act, Arbiter, Register, Speaker};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 fn main() -> eframe::Result<()> {
@@ -143,6 +145,12 @@ struct Ward {
     problem: Option<String>,
     /// A capability currently running, so a pause has a reason on screen.
     using: Option<String>,
+    /// Everything Ward emits goes through here. Nothing speaks yet; captions
+    /// and the transcript already render off it, so when a voice arrives it
+    /// attaches to the same stream rather than beside it.
+    speech: Arbiter,
+    /// When the current act started holding the caption.
+    spoke_at: std::time::Duration,
     window: egui::Vec2,
 }
 
@@ -204,6 +212,8 @@ impl Ward {
             events: None,
             problem: None,
             using: None,
+            speech: Arbiter::default(),
+            spoke_at: std::time::Duration::ZERO,
             window: egui::Vec2::new(980.0, 720.0),
         }
     }
@@ -283,6 +293,13 @@ impl Ward {
                             stop_reason = stop_reason.as_deref().unwrap_or("none"),
                             "turn finished"
                         );
+
+                        let now = diag::since_start();
+                        self.speech.offer(
+                            Act::text(Speaker::Ward, Register::Reply, text.clone(), now),
+                            now,
+                        );
+
                         self.history.push(Message {
                             role: Role::Assistant,
                             text,
@@ -294,6 +311,14 @@ impl Ward {
                 }
                 Event::Failed(message) => {
                     tracing::warn!(target: "ward::turn", error = %message, "turn failed");
+
+                    let now = diag::since_start();
+                    self.speech.offer(
+                        Act::text(Speaker::System, Register::Alert, message.clone(), now)
+                            .about("turn failure"),
+                        now,
+                    );
+
                     self.problem = Some(message);
                     // Drop the partial reply. Keeping it would leave a fragment
                     // on screen that looks like an answer and is not one.
@@ -440,6 +465,14 @@ impl Ward {
                     ui.add_space(10.0);
                     ui.colored_label(ui.visuals().error_fg_color, problem);
                 }
+
+                // The caption line comes off the speech stream rather than off
+                // the model's output, which is what will later keep a caption
+                // on screen for exactly as long as something is being said.
+                if let Some(caption) = self.speech.speaking().and_then(Act::caption) {
+                    ui.add_space(10.0);
+                    ui.weak(caption);
+                }
             });
     }
 }
@@ -469,6 +502,27 @@ impl eframe::App for Ward {
         }
 
         self.pump();
+
+        // Nothing plays audio yet, so an act holds for as long as it would take
+        // to read, then makes way for the next. When a voice arrives it takes
+        // over this pacing - the act ends when the words do - and nothing above
+        // here changes.
+        let now = diag::since_start();
+        match self.speech.speaking() {
+            Some(act) if now.saturating_sub(self.spoke_at) >= act.dwell() => {
+                self.speech.finished();
+            }
+            Some(_) => {}
+            None => {
+                if self.speech.next(now).is_some() {
+                    self.spoke_at = now;
+                }
+            }
+        }
+        if self.speech.speaking().is_some() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(200));
+        }
 
         if self.streaming() {
             // Tokens arrive between frames; ask for the next one rather than

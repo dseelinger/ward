@@ -1,0 +1,33 @@
+# Prose ward does not write.
+#
+# One case-insensitive extended regex per line. Blank lines and lines starting
+# with '#' are ignored. check.sh excludes this file from its own scan.
+#
+# This list is public on purpose: publishing it documents the writing standard.
+# The other list — names of other tools — is deliberately NOT here. See check.sh.
+#
+# These are the tells a word filter can catch. The ones it can't are in the
+# style guide: tricolons, symmetrical bullet lists, a summary sentence closing
+# every paragraph, asserted value in place of described behaviour.
+
+# Asserted value instead of described behaviour.
+\bload-bearing\b
+\bseamless
+\brobust
+\bpowerful
+\belegant
+
+# Register drift.
+\bdelve
+\bleverag
+
+# Filler that adds nothing to a sentence.
+it's worth noting
+it is worth noting
+\bimportantly\b
+that said,
+at its core
+the key insight
+
+# The construction, not the words.
+not just .* but

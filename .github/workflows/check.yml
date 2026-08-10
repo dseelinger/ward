@@ -1,0 +1,43 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The names list is never in the tree. It arrives as a secret and is
+      # written outside the checkout, so no careless `git add` in a later step
+      # can commit the thing this whole check exists to keep out of the repo.
+      #
+      # Secrets are withheld from pull requests opened from a fork. Rather than
+      # let check.sh silently pass with no list — it is built to fail hard in
+      # exactly that case — the workflow skips the step and says so. The check
+      # then runs on merge to main. That exception lives here, where it is
+      # visible, instead of being smuggled into the script as a quiet pass.
+      - name: Materialise the names list
+        id: names
+        env:
+          NAMES: ${{ secrets.WARD_BANNED_NAMES }}
+        run: |
+          if [ -z "$NAMES" ]; then
+            echo "::notice::Names list unavailable (fork pull request). This check runs on merge to main."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf '%s\n' "$NAMES" > "$RUNNER_TEMP/banned-names.txt"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: check.sh
+        if: steps.names.outputs.skip == 'false'
+        env:
+          WARD_BANNED_NAMES: ${{ runner.temp }}/banned-names.txt
+        run: sh check.sh

@@ -1,0 +1,14 @@
+# Git decides text vs binary; committed blobs are always LF.
+* text=auto
+
+# Scripts and hooks must be LF in the working tree too, not only in the blob.
+# A CRLF script does not execute outside Git Bash — the interpreter line reads
+# as `/usr/bin/env sh^M`, which is not a program.
+*.sh        text eol=lf
+.githooks/* text eol=lf
+
+# Journal fixtures are byte-preserved. A parser test has to see what Elite
+# actually wrote, not what Git normalised on the way in; the parser is expected
+# to handle both line endings, so a fixture has to keep whichever it was
+# recorded with.
+**/fixtures/** -text

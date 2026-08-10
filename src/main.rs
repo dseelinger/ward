@@ -11,12 +11,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod anthropic;
+mod capabilities;
+mod capability;
 mod config;
 mod diag;
 mod secrets;
 mod sse;
 
 use anthropic::{Client, Event, Message, Role};
+use std::sync::Arc;
+
 use config::{Settings, State};
 use eframe::egui;
 use serde_json::json;
@@ -58,6 +62,27 @@ fn main() -> eframe::Result<()> {
         }
     };
 
+    // What is actually wired, named in the log. The question "did I remember to
+    // register it" should be answerable by reading a file rather than by
+    // reasoning about the composition point.
+    let registry = capabilities::registry();
+    for capability in registry.capabilities() {
+        tracing::info!(
+            target: "ward::capability",
+            id = capability.id(),
+            group = capability.group(),
+            tools = capability.tools().len(),
+            summary = capability.one_liner(),
+            "registered"
+        );
+    }
+    tracing::info!(
+        target: "ward::capability",
+        capabilities = registry.capabilities().len(),
+        tools = registry.tools().len(),
+        "registry composed"
+    );
+
     let state = State::load(&State::path(&data_dir));
     let size = [
         state.f32("window width").unwrap_or(980.0),
@@ -86,7 +111,7 @@ fn main() -> eframe::Result<()> {
             // a separate piece of work.
             cc.egui_ctx
                 .set_zoom_factor(settings.f32("text size", 0.5, 4.0));
-            Ok(Box::new(Ward::new(settings, state)) as Box<dyn eframe::App>)
+            Ok(Box::new(Ward::new(settings, state, registry)) as Box<dyn eframe::App>)
         }),
     )
 }
@@ -102,6 +127,7 @@ enum Screen {
 
 struct Ward {
     settings: Settings,
+    registry: Arc<capability::Registry>,
     state: State,
     runtime: tokio::runtime::Runtime,
     screen: Screen,
@@ -115,11 +141,14 @@ struct Ward {
     pending: Option<String>,
     events: Option<UnboundedReceiver<Event>>,
     problem: Option<String>,
+    /// A capability currently running, so a pause has a reason on screen.
+    using: Option<String>,
     window: egui::Vec2,
 }
 
 impl Ward {
-    fn new(settings: Settings, state: State) -> Self {
+    fn new(settings: Settings, state: State, registry: capability::Registry) -> Self {
+        let registry = Arc::new(registry);
         let model = settings.string("model");
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -132,7 +161,10 @@ impl Ward {
         let (screen, client) = match secrets::load(&path) {
             Ok(Some(key)) => {
                 tracing::info!(target: "ward::secrets", "stored key loaded");
-                (Screen::Talking, Some(Client::new(key, model.clone())))
+                (
+                    Screen::Talking,
+                    Some(Client::new(key, model.clone(), registry.clone())),
+                )
             }
             Ok(None) => {
                 tracing::info!(target: "ward::secrets", "no key stored yet");
@@ -161,6 +193,7 @@ impl Ward {
 
         Self {
             settings,
+            registry,
             state,
             runtime,
             screen,
@@ -170,6 +203,7 @@ impl Ward {
             pending: None,
             events: None,
             problem: None,
+            using: None,
             window: egui::Vec2::new(980.0, 720.0),
         }
     }
@@ -224,9 +258,13 @@ impl Ward {
         while let Ok(event) = rx.try_recv() {
             match event {
                 Event::Text(chunk) => {
+                    self.using = None;
                     if let Some(pending) = self.pending.as_mut() {
                         pending.push_str(&chunk);
                     }
+                }
+                Event::Using(tool) => {
+                    self.using = Some(tool);
                 }
                 Event::Done { stop_reason } => {
                     let text = self.pending.take().unwrap_or_default();
@@ -251,6 +289,7 @@ impl Ward {
                         });
                     }
 
+                    self.using = None;
                     finished = true;
                 }
                 Event::Failed(message) => {
@@ -259,6 +298,7 @@ impl Ward {
                     // Drop the partial reply. Keeping it would leave a fragment
                     // on screen that looks like an answer and is not one.
                     self.pending = None;
+                    self.using = None;
                     // Take the question back out of the history too, so a retry
                     // does not send it twice.
                     self.history.pop();
@@ -313,7 +353,11 @@ impl Ward {
             match secrets::store(&secrets::key_path(&config::data_dir()), &key) {
                 Ok(()) => {
                     tracing::info!(target: "ward::secrets", "key stored");
-                    self.client = Some(Client::new(key, self.settings.string("model")));
+                    self.client = Some(Client::new(
+                        key,
+                        self.settings.string("model"),
+                        self.registry.clone(),
+                    ));
                     self.screen = Screen::Talking;
                     return;
                 }
@@ -380,7 +424,16 @@ impl Ward {
                 if let Some(pending) = self.pending.as_ref() {
                     ui.add_space(10.0);
                     ui.label(egui::RichText::new("Ward").strong());
-                    ui.label(if pending.is_empty() { "…" } else { pending });
+
+                    if let Some(tool) = self.using.as_ref() {
+                        ui.weak(format!("using {tool}…"));
+                    }
+
+                    if !pending.is_empty() {
+                        ui.label(pending);
+                    } else if self.using.is_none() {
+                        ui.label("…");
+                    }
                 }
 
                 if let Some(problem) = self.problem.as_ref() {

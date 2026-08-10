@@ -11,32 +11,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod anthropic;
+mod config;
 mod diag;
 mod secrets;
 mod sse;
 
-use std::path::PathBuf;
-
 use anthropic::{Client, Event, Message, Role};
+use config::{Settings, State};
 use eframe::egui;
+use serde_json::json;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-/// Everything writable lives in one folder beside the executable, so there is
-/// one thing to delete for a genuine first run and one thing to copy. The
-/// override exists so a test can point somewhere disposable.
-fn data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("WARD_DATA_DIR") {
-        return PathBuf::from(dir);
-    }
-
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|d| d.join("data")))
-        .unwrap_or_else(|| PathBuf::from("data"))
-}
-
 fn main() -> eframe::Result<()> {
-    let data_dir = data_dir();
+    let data_dir = config::data_dir();
 
     // Logging failing is not a reason for Ward not to run. Say so on the
     // console and carry on without it, rather than refusing to start over a
@@ -56,9 +43,30 @@ fn main() -> eframe::Result<()> {
         "starting"
     );
 
+    // A settings file Ward cannot make sense of stops it here, on purpose: a
+    // rejected file means nothing was applied, and starting anyway would run
+    // with defaults while the Commander believes their choices are in effect.
+    let settings = match Settings::load(&Settings::path(&data_dir)) {
+        Ok(settings) => {
+            tracing::info!(target: "ward::config", changed = settings.changed(), "settings loaded");
+            settings
+        }
+        Err(e) => {
+            tracing::error!(target: "ward::config", error = %e, "settings rejected");
+            eprintln!("ward: {e:#}");
+            return Ok(());
+        }
+    };
+
+    let state = State::load(&State::path(&data_dir));
+    let size = [
+        state.f32("window width").unwrap_or(980.0),
+        state.f32("window height").unwrap_or(720.0),
+    ];
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([980.0, 720.0])
+            .with_inner_size(size)
             .with_min_inner_size([520.0, 400.0])
             .with_title("Ward"),
         ..Default::default()
@@ -76,8 +84,9 @@ fn main() -> eframe::Result<()> {
             // replacing it: a Commander who has already told Windows to render
             // at 150% still gets 150%, and this on top. Making it adjustable is
             // a separate piece of work.
-            cc.egui_ctx.set_zoom_factor(1.35);
-            Ok(Box::new(Ward::new()) as Box<dyn eframe::App>)
+            cc.egui_ctx
+                .set_zoom_factor(settings.f32("text size", 0.5, 4.0));
+            Ok(Box::new(Ward::new(settings, state)) as Box<dyn eframe::App>)
         }),
     )
 }
@@ -92,6 +101,8 @@ enum Screen {
 }
 
 struct Ward {
+    settings: Settings,
+    state: State,
     runtime: tokio::runtime::Runtime,
     screen: Screen,
     client: Option<Client>,
@@ -104,21 +115,24 @@ struct Ward {
     pending: Option<String>,
     events: Option<UnboundedReceiver<Event>>,
     problem: Option<String>,
+    window: egui::Vec2,
 }
 
 impl Ward {
-    fn new() -> Self {
+    fn new(settings: Settings, state: State) -> Self {
+        let model = settings.string("model");
+
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("could not start the async runtime");
 
-        let path = secrets::key_path(&data_dir());
+        let path = secrets::key_path(&config::data_dir());
 
         let (screen, client) = match secrets::load(&path) {
             Ok(Some(key)) => {
                 tracing::info!(target: "ward::secrets", "stored key loaded");
-                (Screen::Talking, Some(Client::new(key)))
+                (Screen::Talking, Some(Client::new(key, model.clone())))
             }
             Ok(None) => {
                 tracing::info!(target: "ward::secrets", "no key stored yet");
@@ -146,6 +160,8 @@ impl Ward {
         };
 
         Self {
+            settings,
+            state,
             runtime,
             screen,
             client,
@@ -154,6 +170,7 @@ impl Ward {
             pending: None,
             events: None,
             problem: None,
+            window: egui::Vec2::new(980.0, 720.0),
         }
     }
 
@@ -293,10 +310,10 @@ impl Ward {
         if saved && !entry.trim().is_empty() {
             let key = entry.trim().to_string();
 
-            match secrets::store(&secrets::key_path(&data_dir()), &key) {
+            match secrets::store(&secrets::key_path(&config::data_dir()), &key) {
                 Ok(()) => {
                     tracing::info!(target: "ward::secrets", "key stored");
-                    self.client = Some(Client::new(key));
+                    self.client = Some(Client::new(key, self.settings.string("model")));
                     self.screen = Screen::Talking;
                     return;
                 }
@@ -375,7 +392,29 @@ impl Ward {
 }
 
 impl eframe::App for Ward {
+    /// Remembers the window on the way out.
+    ///
+    /// This is running state, not a setting: if it cannot be written, Ward says
+    /// so and closes anyway. Refusing to exit over a forgotten window size
+    /// would be worse than forgetting it.
+    fn on_exit(&mut self) {
+        self.state.set("window width", json!(self.window.x));
+        self.state.set("window height", json!(self.window.y));
+
+        if let Err(e) = self.state.save(&State::path(&config::data_dir())) {
+            tracing::warn!(target: "ward::config", error = %e, "could not remember the window");
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Recorded every frame so the size at the moment of closing is the one
+        // remembered, without having to ask the window system after the window
+        // has gone. The viewport rect is the window itself, not the area left
+        // inside it after decoration.
+        if let Some(rect) = ui.ctx().input(|i| i.viewport().inner_rect) {
+            self.window = rect.size();
+        }
+
         self.pump();
 
         if self.streaming() {

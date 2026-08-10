@@ -78,11 +78,11 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String, model: String) -> Self {
         Self {
             http: reqwest::Client::new(),
             api_key,
-            model: DEFAULT_MODEL.to_string(),
+            model,
         }
     }
 
@@ -394,7 +394,10 @@ mod tests {
         // message that formatted one, and from there into a log file. This
         // fails the moment somebody replaces the hand-written impl with a
         // derive.
-        let client = Client::new("sk-ant-secret-value-do-not-log".to_string());
+        let client = Client::new(
+            "sk-ant-secret-value-do-not-log".to_string(),
+            DEFAULT_MODEL.to_string(),
+        );
         let printed = format!("{client:?}");
 
         assert!(

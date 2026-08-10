@@ -1,10 +1,10 @@
-# Prose ward does not write.
+# Prose Ward does not write.
 #
 # One case-insensitive extended regex per line. Blank lines and lines starting
 # with '#' are ignored. check.sh excludes this file from its own scan.
 #
 # This list is public on purpose: publishing it documents the writing standard.
-# The other list — names of other tools — is deliberately NOT here. See check.sh.
+# A second, project-specific list lives outside the repository. See check.sh.
 #
 # These are the tells a word filter can catch. The ones it can't are in the
 # style guide: tricolons, symmetrical bullet lists, a summary sentence closing
@@ -31,3 +31,45 @@ the key insight
 
 # The construction, not the words.
 not just .* but
+
+# Ward is written in American English. These are the spellings that slip in
+# most often; the check is cheaper than remembering.
+licence
+behaviour
+materialis
+normalis
+recognis
+organis
+catalogue
+artefact
+whilst
+centre
+colour
+flavour
+favour
+honour
+neighbour
+armour
+analyse
+summaris
+prioritis
+utilis
+emphasise
+specialis
+minimis
+maximis
+optimis
+customis
+authoris
+initialis
+serialis
+synchronis
+labelled
+modelling
+signalling
+programme
+defence
+practise
+judgement
+travelled
+cancelled

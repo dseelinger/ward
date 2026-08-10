@@ -8,7 +8,7 @@
 .githooks/* text eol=lf
 
 # Journal fixtures are byte-preserved. A parser test has to see what Elite
-# actually wrote, not what Git normalised on the way in; the parser is expected
+# actually wrote, not what Git normalized on the way in; the parser is expected
 # to handle both line endings, so a fixture has to keep whichever it was
 # recorded with.
 **/fixtures/** -text

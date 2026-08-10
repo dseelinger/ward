@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 #
-# Rejects a commit message containing a banned term.
+# Rejects a commit message containing a banned word.
 #
 # check.sh cannot see this surface, because a commit message is not a file.
 # Same two lists, same rule: never echo a list, report matches only.
@@ -13,8 +13,8 @@ msg="$1"
 
 repo_root=$(git rev-parse --show-toplevel) || exit 1
 
-WORDS="$repo_root/check/banned-words.txt"
-NAMES="${WARD_BANNED_NAMES:-$repo_root/.local/banned-names.txt}"
+SHARED="$repo_root/check/banned-words.txt"
+LOCAL="${WARD_BANNED_WORDS:-$repo_root/.local/banned-words.txt}"
 
 status=0
 
@@ -31,17 +31,16 @@ load_patterns() {
 
 check_list() {
     list="$1"
-    label="$2"
 
     if [ ! -f "$list" ]; then
-        echo "commit-msg: $label list not found — refusing to check nothing" >&2
+        echo "commit-msg: no word list at $list — refusing to check nothing" >&2
         return 1
     fi
 
     pattern=$(load_patterns "$list")
 
     if [ -z "$pattern" ]; then
-        echo "commit-msg: $label list has no patterns" >&2
+        echo "commit-msg: the word list at $list has no patterns" >&2
         return 1
     fi
 
@@ -49,14 +48,14 @@ check_list() {
 
     if [ -n "$hits" ]; then
         printf '%s\n' "$hits" | sed 's/^/  /' >&2
-        echo "commit-msg: banned $label in commit message" >&2
+        echo "commit-msg: banned word in commit message" >&2
         return 1
     fi
 
     return 0
 }
 
-check_list "$WORDS" "word" || status=1
-check_list "$NAMES" "name" || status=1
+check_list "$SHARED" || status=1
+check_list "$LOCAL" || status=1
 
 exit "$status"

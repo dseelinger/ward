@@ -1,7 +1,7 @@
-# Dependency licences.
+# Dependency licenses.
 #
 # An allowlist, never a blocklist. A blocklist only catches the copyleft
-# licences somebody thought to name; an allowlist catches the one nobody
+# licenses somebody thought to name; an allowlist catches the one nobody
 # thought of, which is how a copyleft codec ends up inside a shipped installer
 # three levels beneath a permissively licensed package with nobody noticing.
 #
@@ -9,9 +9,9 @@
 # green.
 
 [graph]
-# ward is Windows-only, so only this target's dependencies are real. Resolving
+# Ward is Windows-only, so only this target's dependencies are real. Resolving
 # every platform would drag in crates that are never built and never shipped,
-# and asking for a licence decision about code that does not ship is how an
+# and asking for a license decision about code that does not ship is how an
 # allowlist stops meaning anything.
 targets = [{ triple = "x86_64-pc-windows-msvc" }]
 
@@ -38,7 +38,7 @@ allow = [
     "Unicode-3.0",       # unicode-ident and the ICU crates
     "CDLA-Permissive-2.0", # webpki-root-certs, the root certificate bundle
 
-    # Font licences, and the only entries here carrying an obligation that is
+    # Font licenses, and the only entries here carrying an obligation that is
     # not satisfied by the copyright notice alone. They arrive with the UI
     # toolkit's bundled typefaces and are combined with AND, not OR, so they
     # cannot be traded away for a permissive alternative. Attribution is in
@@ -47,7 +47,7 @@ allow = [
     "Ubuntu-font-1.0",   # epaint_default_fonts
 ]
 
-# Some crates offer a choice that includes a copyleft licence. Taking the
+# Some crates offer a choice that includes a copyleft license. Taking the
 # permissive side is the whole point of the choice being offered, and recording
 # it here makes the decision visible rather than implicit.
 [[licenses.exceptions]]

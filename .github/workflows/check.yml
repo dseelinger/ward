@@ -23,26 +23,26 @@ jobs:
       # exactly that case — the workflow skips the step and says so. The check
       # then runs on merge to main. That exception lives here, where it is
       # visible, instead of being smuggled into the script as a quiet pass.
-      - name: Materialise the names list
-        id: names
+      - name: Load the local word list
+        id: words
         env:
-          NAMES: ${{ secrets.WARD_BANNED_NAMES }}
+          WORDS: ${{ secrets.WARD_BANNED_WORDS }}
         run: |
-          if [ -z "$NAMES" ]; then
-            echo "::notice::Names list unavailable (fork pull request). This check runs on merge to main."
+          if [ -z "$WORDS" ]; then
+            echo "::notice::Word list unavailable (fork pull request). This check runs on merge to main."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          printf '%s\n' "$NAMES" > "$RUNNER_TEMP/banned-names.txt"
+          printf '%s\n' "$WORDS" > "$RUNNER_TEMP/banned-words.txt"
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: check.sh
-        if: steps.names.outputs.skip == 'false'
+        if: steps.words.outputs.skip == 'false'
         env:
-          WARD_BANNED_NAMES: ${{ runner.temp }}/banned-names.txt
+          WARD_BANNED_WORDS: ${{ runner.temp }}/banned-words.txt
         run: sh check.sh
 
-  # Windows, because ward talks to the Windows data protection API directly and
+  # Windows, because Ward talks to the Windows data protection API directly and
   # so does not compile anywhere else. Running this on Linux would not be a
   # cheaper version of the same check; it would be a different one that cannot
   # pass.
@@ -59,9 +59,9 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
-  # Licences are an allowlist: anything not named in deny.toml fails. This
+  # Licenses are an allowlist: anything not named in deny.toml fails. This
   # reads dependency metadata rather than building, so it does not need Windows.
-  licences:
+  licenses:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

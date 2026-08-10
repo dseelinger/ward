@@ -1,8 +1,8 @@
-//! ward — a voice companion for Elite Dangerous.
+//! Ward — a voice companion for Elite Dangerous.
 //!
 //! This is the typed turn: ask a question, read the answer. Speech arrives
 //! next, on both ends. Typing is not scaffolding on the way to voice — it stays
-//! for good, because ward has to be reachable without a microphone or a
+//! for good, because Ward has to be reachable without a microphone or a
 //! speaker.
 
 // A console window behind the app is noise for a released build, and in VR it
@@ -39,7 +39,7 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([720.0, 560.0])
             .with_min_inner_size([420.0, 320.0])
-            .with_title("ward"),
+            .with_title("Ward"),
         ..Default::default()
     };
 
@@ -172,10 +172,10 @@ impl Ward {
                     let text = self.pending.take().unwrap_or_default();
 
                     // A refusal arrives as an ordinary success with little or
-                    // no content. Left alone it would render as ward simply
+                    // no content. Left alone it would render as Ward simply
                     // saying nothing, which reads as a bug.
                     if stop_reason.as_deref() == Some("refusal") && text.trim().is_empty() {
-                        self.problem = Some("ward declined to answer that.".to_string());
+                        self.problem = Some("Ward declined to answer that.".to_string());
                     } else if text.trim().is_empty() {
                         self.problem = Some("The reply came back empty.".to_string());
                     } else {
@@ -214,7 +214,7 @@ impl Ward {
         };
 
         ui.add_space(24.0);
-        ui.heading("ward needs an API key");
+        ui.heading("Ward needs an API key");
         ui.add_space(8.0);
         ui.label(
             "Stored encrypted, readable only by this Windows account on this machine. \
@@ -267,9 +267,9 @@ impl Ward {
                 !busy,
                 egui::TextEdit::singleline(&mut self.prompt)
                     .hint_text(if busy {
-                        "ward is answering…"
+                        "Ward is answering…"
                     } else {
-                        "Ask ward something"
+                        "Ask Ward something"
                     })
                     .desired_width(f32::INFINITY),
             );
@@ -292,13 +292,13 @@ impl Ward {
             .show(ui, |ui| {
                 if self.history.is_empty() && self.pending.is_none() {
                     ui.add_space(24.0);
-                    ui.label("Ask ward something to begin.");
+                    ui.label("Ask Ward something to begin.");
                 }
 
                 for message in &self.history {
                     let who = match message.role {
                         Role::User => "Commander",
-                        Role::Assistant => "ward",
+                        Role::Assistant => "Ward",
                     };
 
                     ui.add_space(10.0);
@@ -308,7 +308,7 @@ impl Ward {
 
                 if let Some(pending) = self.pending.as_ref() {
                     ui.add_space(10.0);
-                    ui.label(egui::RichText::new("ward").strong());
+                    ui.label(egui::RichText::new("Ward").strong());
                     ui.label(if pending.is_empty() { "…" } else { pending });
                 }
 

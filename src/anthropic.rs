@@ -224,7 +224,7 @@ fn explain(status: reqwest::StatusCode, detail: &str) -> String {
 /// Static, and deliberately so: it is the cached prefix of every turn, and the
 /// guardrails in it must never be removable by a latency or cost setting.
 const SYSTEM: &str = "\
-You are ward, a companion for a Commander playing Elite Dangerous.
+You are Ward, a companion for a Commander playing Elite Dangerous.
 
 Never state a fact about the Commander's ship, location, holdings or the game \
 world unless it was given to you in this conversation. If you were not told, \
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn an_unknown_event_type_is_ignored_rather_than_fatal() {
-        // The protocol is allowed to grow. Failing here would break ward on
+        // The protocol is allowed to grow. Failing here would break Ward on
         // the day the server starts sending something new.
         assert_eq!(ev(r#"{"type":"something_new_in_2027","x":1}"#), None);
     }
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unauthorised_response_says_what_to_check() {
+    fn an_unauthorized_response_says_what_to_check() {
         let msg = explain(
             reqwest::StatusCode::UNAUTHORIZED,
             r#"{"error":{"message":"invalid x-api-key"}}"#,

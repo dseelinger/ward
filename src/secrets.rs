@@ -3,7 +3,7 @@
 //! A stored key is encrypted with the Windows data protection API under the
 //! current user, so it is unreadable to any other account on the machine and to
 //! this account on any other machine. Copying the data folder somewhere else
-//! therefore prompts for the key again, which is correct behaviour and happens
+//! therefore prompts for the key again, which is correct behavior and happens
 //! to make a clean-install test easy.
 //!
 //! **No environment variable is ever read.** An environment variable is a
@@ -229,14 +229,14 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_not_an_error() {
-        let path = std::env::temp_dir().join("ward-test-absent-key-file");
+        let path = std::env::temp_dir().join("Ward-test-absent-key-file");
         let _ = std::fs::remove_file(&path);
         assert!(load(&path).unwrap().is_none());
     }
 
     #[test]
     fn a_file_without_the_marker_is_rejected_by_name() {
-        let path = std::env::temp_dir().join("ward-test-plaintext-key");
+        let path = std::env::temp_dir().join("Ward-test-plaintext-key");
         std::fs::write(&path, "sk-not-encrypted").unwrap();
 
         let err = load(&path).unwrap_err().to_string();
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn a_stored_key_comes_back() {
-        let path = std::env::temp_dir().join("ward-test-roundtrip-key");
+        let path = std::env::temp_dir().join("Ward-test-roundtrip-key");
         let _ = std::fs::remove_file(&path);
 
         store(&path, "sk-ant-example-0123456789").unwrap();

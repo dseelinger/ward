@@ -33,7 +33,8 @@ pub struct Record {
 }
 
 impl Record {
-    fn parse(line: &str) -> Option<Self> {
+    /// Builds a record from one journal line, or nothing if it is not one.
+    pub(crate) fn parse(line: &str) -> Option<Self> {
         let raw: Value = serde_json::from_str(line).ok()?;
         let event = raw.get("event")?.as_str()?.to_string();
 

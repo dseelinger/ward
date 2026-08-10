@@ -16,6 +16,11 @@ mod capability;
 mod config;
 mod diag;
 mod journal;
+// Test infrastructure rather than application code: its whole purpose is to
+// stand in for the game. It compiles only for tests, so it cannot quietly
+// become something the running application depends on.
+#[cfg(test)]
+mod replay;
 mod secrets;
 mod speech;
 mod sse;

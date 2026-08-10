@@ -314,6 +314,20 @@ impl Arbiter {
     pub fn finished(&mut self) {
         self.speaking = None;
     }
+
+    /// Stop talking, and do not carry on with what was queued.
+    ///
+    /// What the Commander means by interrupting. Dropping only the line being
+    /// spoken would start the next one a beat later, which is a companion that
+    /// cannot be told to be quiet - and everything waiting was queued while
+    /// Ward held the floor, so none of it is what they now want to hear.
+    ///
+    /// An alert survives, because an alert is the case where being talked over
+    /// is the lesser harm.
+    pub fn quiet(&mut self) {
+        self.speaking = None;
+        self.queue.retain(|act| act.register == Register::Alert);
+    }
 }
 
 #[cfg(test)]
@@ -520,5 +534,38 @@ mod tests {
     #[test]
     fn an_empty_stream_yields_nothing() {
         assert!(Arbiter::default().next(at(0)).is_none());
+    }
+
+    #[test]
+    fn being_interrupted_stops_the_line_and_abandons_the_queue() {
+        // What the Commander means by holding the key while Ward is talking.
+        // Dropping only the current line would start the next one a beat
+        // later, which is a companion that cannot be told to be quiet.
+        let mut a = Arbiter::default();
+        a.offer(reply("the long answer", at(0)), at(0));
+        a.next(at(0));
+        a.offer(ambient("and another thing", at(0)), at(0));
+
+        a.quiet();
+
+        assert!(a.speaking().is_none());
+        assert_eq!(a.waiting(), 0, "it carried on with what was queued");
+    }
+
+    #[test]
+    fn being_interrupted_does_not_discard_an_alert() {
+        // Being talked over is the lesser harm for the one register that
+        // exists to say something has gone wrong.
+        let mut a = Arbiter::default();
+        a.offer(reply("the long answer", at(0)), at(0));
+        a.next(at(0));
+        a.offer(
+            Act::text(Speaker::System, Register::Alert, "no key stored", at(0)),
+            at(0),
+        );
+
+        a.quiet();
+
+        assert_eq!(a.waiting(), 1, "the alert was dropped");
     }
 }

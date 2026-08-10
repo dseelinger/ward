@@ -128,6 +128,52 @@ pub fn lookup(xml: &str, action: &str) -> Binding {
     }
 }
 
+/// Every game action already sitting on a given key.
+///
+/// The reverse of [`lookup`], and it exists for one question: is the key the
+/// Commander chose to talk to Ward with also a key that flies the ship? Holding
+/// it to speak would then do both. Ward reports that rather than resolving it —
+/// somebody may have meant it — but a key that quietly boosts every time you
+/// ask a question is not something to discover in a cockpit.
+///
+/// Modifiers are ignored on purpose. A binding qualified by another key is a
+/// different chord and does not fire on its own, and reporting it would train
+/// the Commander to ignore this.
+pub fn actions_bound_to(xml: &str, key: &str) -> Vec<String> {
+    let Ok(document) = roxmltree::Document::parse(xml) else {
+        return Vec::new();
+    };
+
+    let mut found: Vec<String> = Vec::new();
+
+    for binding in document
+        .descendants()
+        .filter(|n| matches!(n.tag_name().name(), "Primary" | "Secondary"))
+    {
+        if binding.attribute("Device") != Some("Keyboard") || binding.attribute("Key") != Some(key)
+        {
+            continue;
+        }
+
+        if binding
+            .children()
+            .any(|c| c.tag_name().name().starts_with("Modifier"))
+        {
+            continue;
+        }
+
+        let Some(action) = binding.parent().map(|p| p.tag_name().name().to_string()) else {
+            continue;
+        };
+
+        if !found.contains(&action) {
+            found.push(action);
+        }
+    }
+
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +196,20 @@ mod tests {
         <Primary Device="{NoDevice}" Key="" />
         <Secondary Device="{NoDevice}" Key="" />
     </NeverBound>
+    <UpThrustButton>
+        <Primary Device="Keyboard" Key="Key_RightShift" />
+        <Secondary Device="{NoDevice}" Key="" />
+    </UpThrustButton>
+    <UseBoostJuice>
+        <Primary Device="Keyboard" Key="Key_RightShift" />
+        <Secondary Device="{NoDevice}" Key="" />
+    </UseBoostJuice>
+    <HeadLookToggle>
+        <Primary Device="Keyboard" Key="Key_RightShift">
+            <Modifier Device="Keyboard" Key="Key_LeftControl" />
+        </Primary>
+        <Secondary Device="{NoDevice}" Key="" />
+    </HeadLookToggle>
 </Root>"#;
 
     #[test]
@@ -206,6 +266,48 @@ mod tests {
     fn nonsense_in_place_of_a_bindings_file_is_not_a_crash() {
         assert_eq!(lookup("<not xml", "PrimaryFire"), Binding::Unbound);
         assert_eq!(lookup("", "PrimaryFire"), Binding::Unbound);
+        assert!(actions_bound_to("<not xml", "Key_F").is_empty());
+    }
+
+    #[test]
+    fn a_key_the_game_already_uses_names_everything_on_it() {
+        // Asked of the push-to-talk key. Holding it to speak would fly the
+        // ship at the same time, and finding that out in the cockpit is worse
+        // than being told at startup.
+        let clashes = actions_bound_to(BINDS, "Key_RightShift");
+
+        assert!(
+            clashes.contains(&"UpThrustButton".to_string()),
+            "{clashes:?}"
+        );
+        assert!(
+            clashes.contains(&"UseBoostJuice".to_string()),
+            "{clashes:?}"
+        );
+    }
+
+    #[test]
+    fn a_key_the_game_does_not_use_reports_nothing() {
+        assert!(actions_bound_to(BINDS, "Key_F12").is_empty());
+    }
+
+    #[test]
+    fn a_binding_that_needs_a_modifier_is_not_a_clash() {
+        // Control-and-the-key is a different chord and does not fire when the
+        // key is held alone. Reporting it would teach the Commander to ignore
+        // this warning, which is worse than not having it.
+        let clashes = actions_bound_to(BINDS, "Key_RightShift");
+        assert!(
+            !clashes.contains(&"HeadLookToggle".to_string()),
+            "a modified binding was reported: {clashes:?}"
+        );
+    }
+
+    #[test]
+    fn a_key_on_the_stick_is_not_confused_with_a_key_on_the_keyboard() {
+        // Joystick buttons carry names of their own, and matching on the name
+        // alone would report a stick button as a keyboard clash.
+        assert!(actions_bound_to(BINDS, "Joy_9").is_empty());
     }
 
     #[test]

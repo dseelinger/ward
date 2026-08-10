@@ -125,18 +125,65 @@ fn is_audio(headers: &[u8]) -> bool {
     String::from_utf8_lossy(headers).contains("Path:audio\r\n")
 }
 
-/// Plays audio and returns when it has finished.
+/// A handle on speech in progress, so it can be cut off mid-word.
+///
+/// This is the ducking half of barge-in. A Commander who presses the key while
+/// Ward is talking has decided that whatever Ward is saying matters less than
+/// what they are about to say, and a companion that finishes its sentence first
+/// is a companion you talk over rather than talk to.
+///
+/// Cloning shares the handle rather than copying it, so the window can stop
+/// what a background thread is playing.
+#[derive(Clone, Default)]
+pub struct Playing(std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<rodio::Player>>>>);
+
+impl Playing {
+    /// Stops whatever is being said, at once and mid-word.
+    ///
+    /// Doing nothing is an ordinary outcome: there is usually nothing playing.
+    pub fn stop(&self) {
+        // Cloned out from under the lock rather than used beneath it. Holding
+        // the lock across the stop would deadlock against the thread that is
+        // playing, which is the one thread this has to be able to reach.
+        let player = match self.0.lock() {
+            Ok(slot) => slot.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+
+        if let Some(player) = player {
+            player.stop();
+        }
+    }
+
+    fn holds(&self, player: Option<std::sync::Arc<rodio::Player>>) {
+        match self.0.lock() {
+            Ok(mut slot) => *slot = player,
+            Err(poisoned) => *poisoned.into_inner() = player,
+        }
+    }
+}
+
+/// Plays audio and returns when it has finished, or when it was cut off.
 ///
 /// Blocking, and called from a thread set aside for it. Speaking is the one
 /// thing Ward does that takes as long as it takes, and hurrying the caller
 /// along would only mean starting the next line over the top of this one.
-pub fn play(audio: Vec<u8>) -> Result<()> {
+pub fn play(audio: Vec<u8>, playing: &Playing) -> Result<()> {
     let device = rodio::DeviceSinkBuilder::open_default_sink().context("no audio output device")?;
 
-    let player = rodio::play(device.mixer(), std::io::Cursor::new(audio))
-        .context("could not decode the speech")?;
+    let player = std::sync::Arc::new(
+        rodio::play(device.mixer(), std::io::Cursor::new(audio))
+            .context("could not decode the speech")?,
+    );
+
+    // Registered before the wait, not after. An interruption arriving in the
+    // gap between starting and being reachable would find nothing to stop, and
+    // Ward would talk over the Commander for the length of a reply.
+    playing.holds(Some(player.clone()));
 
     player.sleep_until_end();
+
+    playing.holds(None);
 
     Ok(())
 }
@@ -376,10 +423,19 @@ mod tests {
         .await
         .expect("synthesis failed");
 
-        tokio::task::spawn_blocking(move || play(speech.audio))
+        let playing = Playing::default();
+
+        tokio::task::spawn_blocking(move || play(speech.audio, &playing))
             .await
             .expect("playback thread failed")
             .expect("playback failed");
+    }
+
+    #[test]
+    fn stopping_nothing_is_an_ordinary_outcome() {
+        // Barge-in fires whenever the key goes down, and most of the time Ward
+        // is not talking. That path has to be silent rather than exceptional.
+        Playing::default().stop();
     }
 
     #[test]

@@ -72,6 +72,17 @@ fn default_setting(key: &str) -> Option<Value> {
         // Off unless switched on. Automation that presses a fire key should be
         // a choice somebody made rather than a surprise on first run.
         "auto honk" => Some(json!(false)),
+        // Named the way the game names keys, because that is the vocabulary a
+        // Commander already has and it is what lets Ward check the choice
+        // against their own bindings file.
+        //
+        // The right shift key: large enough to find by touch with a headset on,
+        // and left unbound by the game, which binds thrust to the left one.
+        "push to talk key" => Some(json!("Key_RightShift")),
+        // Relative, and resolved against the data folder. An absolute path is
+        // honored as given, which is what lets a model live outside a folder
+        // that gets deleted.
+        "speech model" => Some(json!(r"models\ggml-small.en.bin")),
         _ => None,
     }
 }
@@ -153,6 +164,23 @@ impl Settings {
 
     pub fn string(&self, key: &str) -> String {
         self.get(key).as_str().unwrap_or_default().to_string()
+    }
+
+    /// A setting that names a file, resolved against a root when it is
+    /// relative.
+    ///
+    /// Declared relative and resolved late, so the stored file says
+    /// `models\ggml-small.en.bin` rather than carrying somebody's account name
+    /// around inside an absolute path. An absolute value is taken as given -
+    /// half a gigabyte of speech model has good reasons to live somewhere other
+    /// than the folder an installer is free to replace.
+    pub fn file(&self, key: &str, root: &Path) -> PathBuf {
+        let named = PathBuf::from(self.string(key));
+
+        match named.is_absolute() {
+            true => named,
+            false => root.join(named),
+        }
     }
 
     /// Sets a value, or clears it back to the default.
@@ -388,6 +416,31 @@ mod tests {
         let mut s = Settings::default();
         s.set("text size", json!(40.0));
         assert_eq!(s.f32("text size", 0.5, 4.0), 4.0);
+    }
+
+    #[test]
+    fn a_relative_file_setting_lands_in_the_data_folder() {
+        let s = Settings::default();
+        let resolved = s.file("speech model", Path::new(r"C:\ward\data"));
+
+        assert_eq!(
+            resolved,
+            PathBuf::from(r"C:\ward\data\models\ggml-small.en.bin")
+        );
+    }
+
+    #[test]
+    fn an_absolute_file_setting_is_taken_as_given() {
+        // Half a gigabyte of speech model has good reasons to live outside a
+        // folder an installer is free to replace. Joining a root onto an
+        // absolute path is the bug this exists to prevent.
+        let mut s = Settings::default();
+        s.set("speech model", json!(r"D:\models\ggml-medium.en.bin"));
+
+        assert_eq!(
+            s.file("speech model", Path::new(r"C:\ward\data")),
+            PathBuf::from(r"D:\models\ggml-medium.en.bin")
+        );
     }
 
     #[test]

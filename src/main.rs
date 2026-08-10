@@ -18,6 +18,8 @@ mod config;
 mod diag;
 mod honk;
 mod journal;
+mod listen;
+mod mic;
 mod press;
 // Test infrastructure rather than application code: its whole purpose is to
 // stand in for the game. It compiles only for tests, so it cannot quietly
@@ -27,6 +29,7 @@ mod replay;
 mod secrets;
 mod speech;
 mod sse;
+mod transcribe;
 mod voice;
 
 use anthropic::{Client, Event, Message, Role};
@@ -123,7 +126,8 @@ fn main() -> eframe::Result<()> {
             // a separate piece of work.
             cc.egui_ctx
                 .set_zoom_factor(settings.f32("text size", 0.5, 4.0));
-            Ok(Box::new(Ward::new(settings, state, registry)) as Box<dyn eframe::App>)
+            Ok(Box::new(Ward::new(settings, state, registry, &cc.egui_ctx))
+                as Box<dyn eframe::App>)
         }),
     )
 }
@@ -171,11 +175,26 @@ struct Ward {
     /// falls back to the caption's own timing, which is what keeps a failure
     /// to speak from also freezing what is on screen.
     spoken: Option<UnboundedReceiver<()>>,
+    /// Speech in progress, so holding the key can cut it off mid-word.
+    playing: voice::Playing,
+    /// Tells the microphone to ignore Ward's own voice coming back through the
+    /// room. The gate half of barge-in; the handle above is the duck half.
+    hush: listen::Hush,
+    /// What the listening thread has noticed. Absent if it could not start,
+    /// which costs the microphone and nothing else - typing still works.
+    heard: Option<UnboundedReceiver<listen::Voiced>>,
+    /// The key is down and the Commander is talking.
+    listening: bool,
     window: egui::Vec2,
 }
 
 impl Ward {
-    fn new(settings: Settings, state: State, registry: capability::Registry) -> Self {
+    fn new(
+        settings: Settings,
+        state: State,
+        registry: capability::Registry,
+        ctx: &egui::Context,
+    ) -> Self {
         let registry = Arc::new(registry);
         let model = settings.string("model");
 
@@ -219,6 +238,25 @@ impl Ward {
             }
         };
 
+        // Started before anything else needs it, because the slow parts happen
+        // once and on that thread: half a gigabyte of speech model to load and
+        // a capture device to open. By the time a key can be held, there is
+        // nothing left to set up on the path between pressing it and recording.
+        let hush = listen::Hush::default();
+        let heard = Some(listen::spawn(
+            settings.string("push to talk key"),
+            settings.file("speech model", &config::data_dir()),
+            std::path::PathBuf::from(settings.string("bindings folder")),
+            hush.clone(),
+            {
+                // The window is not otherwise repainting while Elite has focus,
+                // so what the microphone hears would sit in the channel until
+                // somebody moved the mouse.
+                let ctx = ctx.clone();
+                move || ctx.request_repaint()
+            },
+        ));
+
         Self {
             settings,
             registry,
@@ -238,6 +276,10 @@ impl Ward {
             speech: Arbiter::default(),
             spoke_at: std::time::Duration::ZERO,
             spoken: None,
+            playing: voice::Playing::default(),
+            hush,
+            heard,
+            listening: false,
             window: egui::Vec2::new(980.0, 720.0),
         }
     }
@@ -370,6 +412,8 @@ impl Ward {
         let voice = self.settings.string("voice");
         let rate = self.settings.string("speaking rate");
         let ctx = ctx.clone();
+        let playing = self.playing.clone();
+        let hush = self.hush.clone();
 
         let (tx, rx) = unbounded_channel();
         self.spoken = Some(rx);
@@ -386,10 +430,24 @@ impl Ward {
                         "synthesized"
                     );
 
+                    // From here until the room settles, nothing the microphone
+                    // hears is the Commander. Set around playback rather than
+                    // around the whole task: synthesis takes a moment, and
+                    // going deaf during it would swallow a question asked while
+                    // Ward was still working out how to say the last answer.
+                    hush.speaking();
+
                     // Playback blocks for as long as the words take, so it goes
                     // somewhere that is allowed to block.
                     let played =
-                        tokio::task::spawn_blocking(move || voice::play(speech.audio)).await;
+                        tokio::task::spawn_blocking(move || voice::play(speech.audio, &playing))
+                            .await;
+
+                    // Unconditional, and before anything else. A hush left in
+                    // place is a microphone that never comes back, and the
+                    // symptom is a Commander holding the key and being ignored
+                    // for the rest of the session.
+                    hush.stopped(diag::since_start());
 
                     if let Ok(Err(e)) = played {
                         tracing::warn!(target: "ward::voice", error = %e, "could not play");
@@ -403,6 +461,72 @@ impl Ward {
             let _ = tx.send(());
             ctx.request_repaint();
         });
+    }
+
+    /// Takes whatever the listening thread has noticed since the last frame.
+    fn pump_voice(&mut self, ctx: &egui::Context) {
+        let Some(rx) = self.heard.as_mut() else {
+            return;
+        };
+
+        let mut said: Option<String> = None;
+        let mut gone = false;
+
+        while let Ok(voiced) = rx.try_recv() {
+            match voiced {
+                listen::Voiced::Listening => {
+                    self.listening = true;
+                    // Barge-in. The Commander pressing the key is the whole of
+                    // the decision - Ward stops talking and does not carry on
+                    // where it left off afterwards.
+                    self.playing.stop();
+                    self.speech.quiet();
+                    self.problem = None;
+                }
+                listen::Voiced::Quiet => {
+                    self.listening = false;
+                }
+                listen::Voiced::Words(text) => {
+                    self.listening = false;
+                    said = Some(text);
+                }
+                listen::Voiced::Clash { key, actions } => {
+                    self.problem = Some(format!(
+                        "{key} is your push-to-talk key and is also bound in Elite to \
+                         {}. Holding it to talk will do that too - change one of them.",
+                        actions.join(", ")
+                    ));
+                }
+                listen::Voiced::Deaf(why) => {
+                    tracing::warn!(target: "ward::listen", reason = %why, "not listening");
+                    self.problem = Some(format!("Ward cannot hear you. {why}"));
+                    gone = true;
+                }
+            }
+        }
+
+        if gone {
+            self.heard = None;
+        }
+
+        let Some(text) = said else {
+            return;
+        };
+
+        tracing::info!(target: "ward::listen", chars = text.len(), "heard");
+
+        self.prompt = text;
+
+        // A reply already arriving owns the turn. Rather than lose what was
+        // said, it is left in the box where the Commander can see it and send
+        // it themselves - which is the one place the typed path earns its keep
+        // twice.
+        if self.streaming() {
+            tracing::info!(target: "ward::listen", "a turn was already running");
+            return;
+        }
+
+        self.send(ctx);
     }
 
     /// Drains whatever the turn has produced since the last frame.
@@ -551,14 +675,19 @@ impl Ward {
         ui.horizontal(|ui| {
             let send = ui.add_enabled(!busy, egui::Button::new("Send"));
 
+            let hint = match (busy, self.listening) {
+                // Listening wins: it is the state the Commander is currently
+                // holding a key to be in, and it is the one they are waiting
+                // for confirmation of.
+                (_, true) => "Listening…",
+                (true, _) => "Ward is answering…",
+                _ => "Ask Ward something, or hold your push-to-talk key",
+            };
+
             let field = ui.add_enabled(
                 !busy,
                 egui::TextEdit::singleline(&mut self.prompt)
-                    .hint_text(if busy {
-                        "Ward is answering…"
-                    } else {
-                        "Ask Ward something"
-                    })
+                    .hint_text(hint)
                     .desired_width(f32::INFINITY),
             );
 
@@ -661,11 +790,8 @@ impl eframe::App for Ward {
         }
 
         self.pump();
+        self.pump_voice(&ui.ctx().clone());
 
-        // Nothing plays audio yet, so an act holds for as long as it would take
-        // to read, then makes way for the next. When a voice arrives it takes
-        // over this pacing - the act ends when the words do - and nothing above
-        // here changes.
         let now = diag::since_start();
         self.read_journal(now);
 

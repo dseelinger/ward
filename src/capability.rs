@@ -135,6 +135,19 @@ pub trait Capability: Send + Sync {
         let _ = input;
         format!("{} has no tool called {tool}", self.id())
     }
+
+    /// Something happened in the game.
+    ///
+    /// The other half of what a capability can be. Most of what Ward will
+    /// eventually notice arrives this way rather than by being asked, and a
+    /// capability that only reacts is a supported shape rather than a gap.
+    ///
+    /// Takes `&self`: a registry is shared and never mutable, so a capability
+    /// keeping state keeps it behind its own lock. That also stops one
+    /// capability's bookkeeping from becoming everybody's problem.
+    fn on_event(&self, record: &crate::journal::Record) {
+        let _ = record;
+    }
 }
 
 /// The capabilities this build has, in declaration order.
@@ -176,6 +189,17 @@ impl Registry {
         }
 
         format!("Ward has no tool called {tool}.")
+    }
+
+    /// Hands an event to every capability.
+    ///
+    /// All of them, always. Deciding here which capabilities care would mean
+    /// this list knowing what each one is for, which is the knowledge the
+    /// descriptor exists to keep in one place.
+    pub fn on_event(&self, record: &crate::journal::Record) {
+        for capability in &self.capabilities {
+            capability.on_event(record);
+        }
     }
 
     /// Tool names that appear more than once.

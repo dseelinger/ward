@@ -718,7 +718,9 @@ mod tests {
         let client = Client::new(
             "sk-ant-secret-value-do-not-log".to_string(),
             DEFAULT_MODEL.to_string(),
-            Arc::new(crate::capabilities::registry()),
+            Arc::new(crate::capabilities::registry(
+                &crate::config::Settings::default(),
+            )),
         );
         let printed = format!("{client:?}");
 
@@ -745,7 +747,7 @@ mod tests {
             stream: true,
             system: "s",
             output_config: OutputConfig { effort: "low" },
-            tools: crate::capabilities::registry().tools(),
+            tools: crate::capabilities::registry(&crate::config::Settings::default()).tools(),
             messages: &[],
         })
         .unwrap();

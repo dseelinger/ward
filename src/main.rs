@@ -11,11 +11,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod anthropic;
+mod bindings;
 mod capabilities;
 mod capability;
 mod config;
 mod diag;
+mod honk;
 mod journal;
+mod press;
 // Test infrastructure rather than application code: its whole purpose is to
 // stand in for the game. It compiles only for tests, so it cannot quietly
 // become something the running application depends on.
@@ -74,7 +77,7 @@ fn main() -> eframe::Result<()> {
     // What is actually wired, named in the log. The question "did I remember to
     // register it" should be answerable by reading a file rather than by
     // reasoning about the composition point.
-    let registry = capabilities::registry();
+    let registry = capabilities::registry(&settings);
     for capability in registry.capabilities() {
         tracing::info!(
             target: "ward::capability",
@@ -343,6 +346,11 @@ impl Ward {
                 at = record.timestamp.map(|t| t.to_string()).unwrap_or_default(),
                 "observed"
             );
+
+            // Only what happened since Ward started looking. Replaying the
+            // backlog through here would fire the scanner for every arrival of
+            // the session at once, every time Ward starts.
+            self.registry.on_event(record);
         }
     }
 
@@ -623,6 +631,17 @@ impl eframe::App for Ward {
     /// so and closes anyway. Refusing to exit over a forgotten window size
     /// would be worse than forgetting it.
     fn on_exit(&mut self) {
+        // Before anything else, and unconditionally. A key left down when Ward
+        // closes is a throttle in Elite that will not stop, and the Commander
+        // cannot fix it by pressing the key themselves - the game already
+        // believes it is held.
+        let holding = press::held();
+        press::release_all();
+
+        if holding > 0 {
+            tracing::warn!(target: "ward::act", keys = holding, "released keys on the way out");
+        }
+
         self.state.set("window width", json!(self.window.x));
         self.state.set("window height", json!(self.window.y));
 

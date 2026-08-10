@@ -18,8 +18,25 @@ use crate::capability::{Capability, Registry, Tool};
 /// Ordered on purpose. The tool schemas go out ahead of the conversation on
 /// every turn and are matched as a prefix of bytes, so this order is part of
 /// what makes the cache hit.
-pub fn registry() -> Registry {
-    Registry::new(vec![Box::new(Version)])
+pub fn registry(settings: &crate::config::Settings) -> Registry {
+    let honk = crate::honk::Honk::new(
+        settings.flag("auto honk"),
+        read_fire_binding(&settings.string("bindings folder")),
+    );
+
+    Registry::new(vec![Box::new(Version), Box::new(honk)])
+}
+
+/// Reads the Commander's fire binding once, at startup.
+fn read_fire_binding(folder: &str) -> crate::bindings::Binding {
+    let Some(file) = crate::bindings::active_file(std::path::Path::new(folder)) else {
+        return crate::bindings::Binding::Unbound;
+    };
+
+    match std::fs::read_to_string(&file) {
+        Ok(xml) => crate::bindings::lookup(&xml, "PrimaryFire"),
+        Err(_) => crate::bindings::Binding::Unbound,
+    }
 }
 
 // --- version -----------------------------------------------------------------
@@ -75,20 +92,24 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn test_registry() -> Registry {
+        registry(&crate::config::Settings::default())
+    }
+
     #[test]
     fn the_registry_is_not_empty() {
         // A test that discovers things and finds none of them passes, which is
         // the one failure a registry test exists to catch. Assert the
         // enumeration itself, not only what is in it.
         assert!(
-            !registry().capabilities().is_empty(),
+            !test_registry().capabilities().is_empty(),
             "no capability is wired up"
         );
     }
 
     #[test]
     fn every_capability_describes_itself() {
-        for capability in registry().capabilities() {
+        for capability in test_registry().capabilities() {
             let id = capability.id();
             assert!(!capability.group().is_empty(), "{id} has no group");
             assert!(!capability.one_liner().is_empty(), "{id} has no one-liner");
@@ -97,7 +118,7 @@ mod tests {
 
     #[test]
     fn every_tool_is_described_and_named_once() {
-        let r = registry();
+        let r = test_registry();
 
         assert!(
             r.duplicate_tool_names().is_empty(),
@@ -120,7 +141,7 @@ mod tests {
         // Examples feed the model and the interface. They are never matched
         // against transcribed speech, so their job is to be natural rather
         // than exhaustive.
-        for capability in registry().capabilities() {
+        for capability in test_registry().capabilities() {
             if capability.tools().is_empty() {
                 continue;
             }
@@ -134,7 +155,7 @@ mod tests {
 
     #[test]
     fn the_version_tool_reports_the_real_version() {
-        let answer = registry().run("ward_version", &json!({}));
+        let answer = test_registry().run("ward_version", &json!({}));
         assert_eq!(answer, format!("Ward {}", env!("CARGO_PKG_VERSION")));
         assert!(answer.contains('.'), "should look like a version: {answer}");
     }

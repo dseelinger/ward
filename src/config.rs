@@ -68,8 +68,17 @@ fn default_setting(key: &str) -> Option<Value> {
         // rather than stored absolute, so a settings file never carries
         // somebody's account name around in it.
         "journal folder" => Some(json!(default_journal_folder())),
+        "bindings folder" => Some(json!(default_bindings_folder())),
+        // Off unless switched on. Automation that presses a fire key should be
+        // a choice somebody made rather than a surprise on first run.
+        "auto honk" => Some(json!(false)),
         _ => None,
     }
+}
+
+fn default_bindings_folder() -> String {
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    format!(r"{local}\Frontier Developments\Elite Dangerous\Options\Bindings")
 }
 
 fn default_journal_folder() -> String {
@@ -136,6 +145,10 @@ impl Settings {
         // and honoring it would render Ward unusable and unfixable - the
         // controls needed to correct it would be the ones off screen.
         raw.clamp(floor, ceiling)
+    }
+
+    pub fn flag(&self, key: &str) -> bool {
+        self.get(key).as_bool().unwrap_or(false)
     }
 
     pub fn string(&self, key: &str) -> String {

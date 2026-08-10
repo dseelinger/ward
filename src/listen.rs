@@ -639,7 +639,7 @@ mod tests {
             "pressing the key while Ward talks must still open the gate"
         );
 
-        // Playback is cancelled and the tail begins.
+        // Playback is stopped and the tail begins.
         rig.hush.stopped(rig.clock);
         rig.clock += TAIL;
 

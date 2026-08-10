@@ -39,8 +39,15 @@ LOCAL="${WARD_BANNED_WORDS:-.local/banned-words.txt}"
 echo "==> banned words"
 
 scan_files() {
+    # Tracked files and new ones that are not ignored. Both, because a file's
+    # first commit is the one this check was least able to see: `git ls-files`
+    # alone skips anything not yet added, so a new module passes locally and
+    # fails in CI the moment it is committed. That happened once, over a
+    # British spelling in a comment.
+    #
     # Exclude the shared list from its own scan; it contains every pattern.
-    git ls-files -z | grep -zv '^check/banned-words\.txt$'
+    git ls-files -z --cached --others --exclude-standard |
+        grep -zv '^check/banned-words\.txt$'
 }
 
 # The list files allow '#' comments and blank lines, so they cannot be handed

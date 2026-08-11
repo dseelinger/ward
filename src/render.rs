@@ -68,33 +68,29 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Draws egui into an offscreen image.
-pub struct Renderer {
+/// One Vulkan device, shared by every layer in the headset.
+///
+/// **There is exactly one of these per process, and that is not a saving.** OpenVR keeps its
+/// Vulkan state per process rather than per texture, so handing the compositor images from two
+/// devices corrupts it — and it does not fail politely. Two renderers, each with a device of its
+/// own, ran perfectly until the first caption appeared while the panel was also up, and then took
+/// `vrclient_x64.dll` down with an access violation inside OpenVR's own code.
+///
+/// That is the specific reason this type exists. The layers above own their own image, their own
+/// widget tree and their own input; they borrow the one device underneath.
+pub struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     adapter_info: wgpu::AdapterInfo,
-    target: wgpu::Texture,
-    /// Destination for the one-texel copy that ends each frame. Written, never read.
-    settled: wgpu::Buffer,
-    size: (u32, u32),
-    context: egui::Context,
-    painter: egui_wgpu::Renderer,
-    pointer: Option<egui::Pos2>,
-    pressed: bool,
-    was_pressed: bool,
-    /// Scrolling that arrived since the last frame, waiting to be delivered.
-    scrolled: egui::Vec2,
-    /// What was typed since the last frame, already in the toolkit's terms.
-    typing: Vec<egui::Event>,
 }
 
-impl Renderer {
-    /// Brings up Vulkan on the best adapter available and makes an image to draw into.
+impl Gpu {
+    /// Brings up Vulkan on the best adapter available.
     ///
     /// # Errors
     ///
     /// Fails if there is no Vulkan adapter, or if the one found will not give up a device.
-    pub fn new(width: u32, height: u32) -> Result<Self, Error> {
+    pub fn new() -> Result<Self, Error> {
         // Vulkan only. DX12 would work for drawing and then have nothing to hand OpenVR, which
         // is a failure three steps downstream of its cause.
         // No display handle: there is no window and there is never going to be one here.
@@ -116,14 +112,55 @@ impl Renderer {
         }))
         .map_err(Error::NoDevice)?;
 
-        let target = make_target(&device, width, height);
+        Ok(Self {
+            device,
+            queue,
+            adapter_info,
+        })
+    }
+
+    /// Which adapter this ended up on, and over which backend.
+    #[must_use]
+    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
+        &self.adapter_info
+    }
+}
+
+/// Draws egui into an offscreen image.
+pub struct Renderer {
+    gpu: std::sync::Arc<Gpu>,
+    target: wgpu::Texture,
+    /// Destination for the one-texel copy that ends each frame. Written, never read.
+    settled: wgpu::Buffer,
+    size: (u32, u32),
+    context: egui::Context,
+    painter: egui_wgpu::Renderer,
+    pointer: Option<egui::Pos2>,
+    pressed: bool,
+    was_pressed: bool,
+    /// Scrolling that arrived since the last frame, waiting to be delivered.
+    scrolled: egui::Vec2,
+    /// What was typed since the last frame, already in the toolkit's terms.
+    typing: Vec<egui::Event>,
+}
+
+impl Renderer {
+    /// Makes an image to draw into, on a device somebody else owns.
+    ///
+    /// Infallible, because everything that can go wrong went wrong in [`Gpu::new`]. That is the
+    /// point of the split: bringing Vulkan up is a thing that happens once and can fail, and
+    /// adding a layer to a device that already works cannot.
+    pub fn new(gpu: &std::sync::Arc<Gpu>, width: u32, height: u32) -> Self {
+        let device = &gpu.device;
+
+        let target = make_target(device, width, height);
         let settled = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("overlay layout settle"),
             size: 4,
             usage: wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let painter = egui_wgpu::Renderer::new(&device, FORMAT, RendererOptions::default());
+        let painter = egui_wgpu::Renderer::new(device, FORMAT, RendererOptions::default());
 
         // Tell egui it is being pointed at rather than moused at.
         //
@@ -143,10 +180,8 @@ impl Renderer {
             options.input_options.max_click_duration = f64::INFINITY;
         });
 
-        Ok(Self {
-            device,
-            queue,
-            adapter_info,
+        Self {
+            gpu: gpu.clone(),
             target,
             settled,
             size: (width, height),
@@ -157,7 +192,7 @@ impl Renderer {
             was_pressed: false,
             scrolled: egui::Vec2::ZERO,
             typing: Vec::new(),
-        })
+        }
     }
 
     /// The image as bytes, so a caption can be looked at without a headset.
@@ -172,7 +207,7 @@ impl Renderer {
         let padded = aligned.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("read back"),
             size: u64::from(padded) * u64::from(height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
@@ -180,6 +215,7 @@ impl Renderer {
         });
 
         let mut encoder = self
+            .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("read back"),
@@ -200,11 +236,12 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.gpu.queue.submit(std::iter::once(encoder.finish()));
 
         let slice = buffer.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device
+        self.gpu
+            .device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("the queue drains");
 
@@ -219,12 +256,6 @@ impl Renderer {
         drop(mapped);
         buffer.unmap();
         pixels
-    }
-
-    /// Which adapter this ended up on, and over which backend.
-    #[must_use]
-    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
-        &self.adapter_info
     }
 
     /// How big the image currently is, in pixels.
@@ -247,7 +278,7 @@ impl Renderer {
             return;
         }
 
-        self.target = make_target(&self.device, width, height);
+        self.target = make_target(&self.gpu.device, width, height);
         self.size = (width, height);
     }
 
@@ -405,18 +436,23 @@ impl Renderer {
         for (id, deltas) in &output.textures_delta.set {
             for delta in deltas {
                 self.painter
-                    .update_texture(&self.device, &self.queue, *id, delta);
+                    .update_texture(&self.gpu.device, &self.gpu.queue, *id, delta);
             }
         }
 
         let mut encoder = self
+            .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("overlay frame"),
             });
-        let staged =
-            self.painter
-                .update_buffers(&self.device, &self.queue, &mut encoder, &jobs, &screen);
+        let staged = self.painter.update_buffers(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &mut encoder,
+            &jobs,
+            &screen,
+        );
 
         {
             let view = self.target.create_view(&wgpu::TextureViewDescriptor {
@@ -478,7 +514,8 @@ impl Renderer {
             },
         );
 
-        self.queue
+        self.gpu
+            .queue
             .submit(staged.into_iter().chain(std::iter::once(encoder.finish())));
 
         for id in &output.textures_delta.free {
@@ -506,8 +543,8 @@ impl Renderer {
         // live as long as this Renderer.
         unsafe {
             let texture = self.target.as_hal::<Vulkan>()?;
-            let device = self.device.as_hal::<Vulkan>()?;
-            let queue = self.queue.as_hal::<Vulkan>()?;
+            let device = self.gpu.device.as_hal::<Vulkan>()?;
+            let queue = self.gpu.queue.as_hal::<Vulkan>()?;
 
             Some(crate::vr::VulkanImage {
                 image: ash::vk::Handle::as_raw(texture.raw_handle()),

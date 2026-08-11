@@ -196,8 +196,14 @@ fn big(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<Intent>)
                 local.settings_open = true;
             }
 
+            // What the number counts, in the words a Commander would use. "3 changed" on its own
+            // is a number with no noun: it reads as three of something unspecified having gone
+            // wrong, when it means three settings differ from what Ward ships.
             if view.settings.changed() > 0 {
-                ui.weak(format!("{} changed", view.settings.changed()));
+                ui.weak(format!("{} settings changed from default", view.settings.changed()))
+                    .on_hover_text(
+                        "Ward writes down only what you change. Everything else follows the                          default, and empties back to it.",
+                    );
             }
 
             // Pushed to the right so it never moves the two tabs around, and

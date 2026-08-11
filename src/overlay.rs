@@ -184,12 +184,18 @@ fn serve(
     captions: &Arc<Mutex<Captions>>,
     engine: &Handle,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut caption_art = crate::render::Renderer::new(PIXELS.0, PIXELS.1)?;
-    let mut panel_art = crate::render::Renderer::new(PANEL_PIXELS.0, PANEL_PIXELS.1)?;
+    // One device for both layers, and that is a correctness requirement rather than a saving.
+    // OpenVR keeps its Vulkan state per process, so two devices submitting to the compositor
+    // corrupts it - which showed up as an access violation inside `vrclient_x64.dll` the first
+    // time a caption appeared while the panel was up.
+    let gpu = std::sync::Arc::new(crate::render::Gpu::new()?);
+
+    let mut caption_art = crate::render::Renderer::new(&gpu, PIXELS.0, PIXELS.1);
+    let mut panel_art = crate::render::Renderer::new(&gpu, PANEL_PIXELS.0, PANEL_PIXELS.1);
 
     tracing::info!(
         target: "ward::vr",
-        adapter = %panel_art.adapter_info().name,
+        adapter = %gpu.adapter_info().name,
         "drawing captions and the panel"
     );
 
@@ -384,6 +390,12 @@ impl Panel {
                 _ => (PANEL_PIXELS, BIG_WIDTH),
             };
 
+            // Let go before the image is replaced. OpenVR reads a texture it was handed until it
+            // is told otherwise, and `resize` drops the old one.
+            layer.forget_texture();
+            // Let go before the image is replaced. OpenVR reads a texture it was handed until it
+            // is told otherwise, and `resize` drops the old one.
+            layer.forget_texture();
             art.resize(pixels.0, pixels.1);
             // Told again, because the mouse scale is the image's own pixels and the image just
             // changed. Skipped, the ray would land somewhere else entirely on the mini panel.
@@ -499,12 +511,24 @@ impl Panel {
         // Said once, and only once there is something to say. A grab that does nothing because no
         // controller was ever seen looks exactly like a grab that was seen and ignored, and the
         // legacy input this reads is the kind of thing SteamVR turns off without telling anybody.
-        if !self.saw_controllers && !controllers.is_empty() {
-            tracing::info!(
-                target: "ward::vr",
-                controllers = controllers.len(),
-                "controllers found, so the panel can be grabbed"
-            );
+        if !self.saw_controllers {
+            match controllers.is_empty() {
+                false => tracing::info!(
+                    target: "ward::vr",
+                    controllers = controllers.len(),
+                    "controllers found, so the panel can be grabbed"
+                ),
+                // The census is the whole diagnosis. "Nothing connected" means pick a controller
+                // up; "2 controllers" alongside this line means they are connected and OpenVR is
+                // refusing to report their buttons, which is a different and much larger fix.
+                true => tracing::info!(
+                    target: "ward::vr",
+                    connected = %session.census(),
+                    "no controllers to grab with yet"
+                ),
+            }
+
+            // Said once either way. This runs every frame the panel is up.
             self.saw_controllers = true;
         }
 
@@ -577,7 +601,10 @@ impl Panel {
 
         if wanted && !self.typing {
             match layer.show_keyboard("Ward", "") {
-                Ok(()) => self.typing = true,
+                Ok(()) => {
+                    tracing::info!(target: "ward::vr", "keyboard up");
+                    self.typing = true;
+                }
                 Err(e) => {
                     tracing::warn!(target: "ward::vr", error = %e, "no keyboard in the headset");
                     // Marked as up anyway, so a refusal is one line in the log rather than one
@@ -586,6 +613,7 @@ impl Panel {
                 }
             }
         } else if !wanted && self.typing {
+            tracing::info!(target: "ward::vr", "keyboard away");
             layer.hide_keyboard();
             self.typing = false;
         }
@@ -735,7 +763,8 @@ mod tests {
     #[test]
     #[ignore = "needs a Vulkan device"]
     fn caption_to_look_at() {
-        let mut renderer = crate::render::Renderer::new(PIXELS.0, PIXELS.1).expect("no renderer");
+        let gpu = std::sync::Arc::new(crate::render::Gpu::new().expect("no Vulkan device"));
+        let mut renderer = crate::render::Renderer::new(&gpu, PIXELS.0, PIXELS.1);
 
         let caption = crate::captions::Caption {
             lines: vec![
@@ -791,8 +820,11 @@ mod tests {
     #[test]
     #[ignore = "needs a Vulkan device"]
     fn panel_to_look_at() {
-        let mut renderer =
-            crate::render::Renderer::new(PANEL_PIXELS.0, PANEL_PIXELS.1).expect("no renderer");
+        // One device, two layers, exactly as the running overlay does it — because that is the
+        // arrangement that crashed OpenVR when it was two devices, and a test that builds it the
+        // easy way would be testing something the application never does.
+        let gpu = std::sync::Arc::new(crate::render::Gpu::new().expect("no Vulkan device"));
+        let mut renderer = crate::render::Renderer::new(&gpu, PANEL_PIXELS.0, PANEL_PIXELS.1);
 
         let view = crate::engine::View {
             key_stored: true,

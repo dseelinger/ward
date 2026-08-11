@@ -255,6 +255,59 @@ impl Vr {
         found
     }
 
+    /// What SteamVR says is connected, counted by kind.
+    ///
+    /// Purely for the log, and it earns its place: a grab that does nothing is the same silence
+    /// whether no controller is switched on, or one is switched on and OpenVR will not report its
+    /// buttons. Those two have completely different fixes — pick up a controller, or stop using
+    /// the legacy input API — and nothing else distinguishes them from outside the headset.
+    #[must_use]
+    pub fn census(&self) -> String {
+        let Some(class_of) = self.system.GetTrackedDeviceClass else {
+            return "no way to ask what is connected".to_string();
+        };
+
+        let mut counts = [0usize; 5];
+
+        for (index, pose) in self.poses_raw().iter().enumerate() {
+            if !pose.bDeviceIsConnected {
+                continue;
+            }
+
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the array is 64 long and indexed by a u32 everywhere in OpenVR"
+            )]
+            let class = unsafe { class_of(index as u32) };
+
+            if let Ok(class) = usize::try_from(class)
+                && class < counts.len()
+            {
+                counts[class] += 1;
+            }
+        }
+
+        let named = [
+            "invalid",
+            "headset",
+            "controller",
+            "tracker",
+            "base station",
+        ];
+
+        let seen: Vec<String> = counts
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count > 0)
+            .map(|(class, count)| format!("{count} {}", named[class]))
+            .collect();
+
+        match seen.is_empty() {
+            true => "nothing connected".to_string(),
+            false => seen.join(", "),
+        }
+    }
+
     /// Every device's pose, as a transform, with the invalid ones blanked out.
     fn poses(&self) -> Vec<Option<Affine3A>> {
         self.poses_raw()
@@ -497,7 +550,9 @@ impl Overlay<'_> {
                 sys::VROverlayFlags_SendVRDiscreteScrollEvents,
                 true,
             )
-        })
+        })?;
+
+        self.put_on_top()
     }
 
     /// Everything that has happened on this overlay since the last time it was asked.
@@ -593,6 +648,47 @@ impl Overlay<'_> {
         }
 
         out
+    }
+
+    /// Puts this overlay in front of everything else SteamVR is drawing.
+    ///
+    /// Two calls, because being on top is two separate questions. The sort order settles it
+    /// against other overlays. The flag settles it against SteamVR's own furniture — its menu, its
+    /// keyboard, its notifications — which are drawn as a class of overlay that ordinary ones sit
+    /// behind by default. Without it the panel is perfectly legible right up until the moment
+    /// anything of SteamVR's own appears, and then it is behind it.
+    ///
+    /// # Errors
+    ///
+    /// Fails if either call is refused.
+    fn put_on_top(&self) -> Result<(), Error> {
+        if let Some(sort) = self.table.SetOverlaySortOrder {
+            check("SetOverlaySortOrder", unsafe { sort(self.handle, ON_TOP) })?;
+        }
+
+        let Some(flag) = self.table.SetOverlayFlag else {
+            return Ok(());
+        };
+
+        check("SetOverlayFlag", unsafe {
+            flag(
+                self.handle,
+                sys::VROverlayFlags_SortWithNonSceneOverlays,
+                true,
+            )
+        })
+    }
+
+    /// Lets go of the image the compositor is holding.
+    ///
+    /// Called before the image behind it is thrown away. OpenVR goes on reading a texture it was
+    /// handed until it is told not to, so replacing one without this leaves the compositor
+    /// sampling memory that has been freed — the same hazard [`Drop`] guards against, in the one
+    /// other place an image stops existing.
+    pub fn forget_texture(&self) {
+        if let Some(clear) = self.table.ClearOverlayTexture {
+            unsafe { clear(self.handle) };
+        }
     }
 
     /// Where a ray meets this overlay, if it does.
@@ -763,6 +859,13 @@ const DEVICES: u32 = sys::k_unMaxTrackedDeviceCount;
 /// Generous, because the longest thing anybody types into Ward is a folder path or an API key,
 /// and a keyboard that silently stops accepting input is worse than one that never opened.
 const MOST_TYPED: u32 = 1024;
+
+/// Where the panel sits among everything else SteamVR is drawing.
+///
+/// High rather than highest. Ward's panel belongs in front of the game and in front of other
+/// overlays, and it has no business claiming it outranks a system warning about a tracker running
+/// out of battery.
+const ON_TOP: u32 = 100;
 
 /// Room scale, so a panel put down stays where it was put.
 ///

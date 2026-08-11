@@ -310,6 +310,9 @@ struct Panel {
     pressed: bool,
     /// Where the ray last was, in the image's own pixels, so a press knows what it landed on.
     pointer: Option<(f32, f32)>,
+    /// The physical keyboard, read directly because a headset has no window focus to be given
+    /// keystrokes through.
+    keyboard: crate::keys::Keyboard,
     /// Where the grab strip was drawn last frame, in the image's own pixels.
     strip: Option<egui::Rect>,
     /// Whether the last press landed on the strip along the top rather than on the interface.
@@ -429,6 +432,21 @@ impl Panel {
         }
 
         // After drawing, because whether anything wants typing is something the frame decides.
+        //
+        // The real keyboard first. It is read whether or not SteamVR's own is up, because a
+        // Commander at a desk with a headset on still has hands and a keyboard in front of them,
+        // and that is a shorter route to a folder path than picking the letters off a panel.
+        let typed = self.keyboard.typed(art.wants_typing());
+
+        if !typed.is_empty() {
+            if !self.typed_anything {
+                tracing::info!(target: "ward::vr", "typing is reaching the panel");
+                self.typed_anything = true;
+            }
+
+            art.typed(&typed);
+        }
+
         self.keyboard(layer, art);
 
         let Some(image) = art.vulkan_image() else {

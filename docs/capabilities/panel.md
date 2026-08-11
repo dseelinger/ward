@@ -118,11 +118,26 @@ away as accidental drags before that was fixed.
 
 ## Typing
 
-Point at any text box and SteamVR's own keyboard comes up, with your layout and
-the way of typing you already know. What you type goes into the box as you type
-it, and the keyboard goes away when you move on. Ward does not draw a keyboard
-of its own — a worse copy that you would have to point at with the same ray it
-was competing with.
+**Your own keyboard works.** Point at a text box on the panel and type, and the
+letters go in — no clicking through to the desktop first. Ward reads the keyboard
+directly, because a headset overlay is never given the keyboard focus that would
+normally deliver keystrokes to it.
+
+There is one consequence of that worth knowing: **the keys still reach whatever
+else is in front.** Typing into the panel while Elite has focus also types into
+Elite, and letters are bound to things there. Type from the SteamVR dashboard, or
+with Ward's own window in front, and nothing else sees it.
+
+Ward reads the keys rather than taking them, deliberately. Taking a key away from
+the game means something that can fail with the keyboard still swallowed, and a
+Commander who cannot fly because Ward stopped handing their keys back is a far
+worse problem than one who has to click away from a text box.
+
+Your layout is whatever Windows says it is, so a key types the letter printed on
+it. Backspace deletes.
+
+SteamVR's own keyboard also comes up when a box takes focus, for pointing at when
+there is no real keyboard within reach.
 
 The conversation is deliberately not selectable text. Dragging a selection across
 a log that is growing underneath you is a poor experience with a mouse and a

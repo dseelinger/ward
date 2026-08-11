@@ -22,6 +22,7 @@ mod diag;
 mod engine;
 mod honk;
 mod journal;
+mod keys;
 mod listen;
 mod mic;
 mod outside;

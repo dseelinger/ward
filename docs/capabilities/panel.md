@@ -46,9 +46,10 @@ already do that, paced by the voice and placed under what you are looking at,
 and a second copy of it a foot to the side is the same duplication the desktop
 conversation refuses to make.
 
-## Three ways to summon it
+## Two ways to summon it
 
-Because in a headset there is always one of the three that is inconvenient.
+Because in a headset one of them is always inconvenient: hands on the stick, say
+it; mid-sentence with the model, press it.
 
 **Say so.** "Show me the panel", "put it away", or "give me the small one".
 
@@ -67,21 +68,20 @@ alone, which matters because the other two routes each need something — the
 spoken one needs Ward to be hearing you, and the grab needs a controller in
 your hand.
 
-**Use your hands.** Point at the strip along the top of the panel and hold the
-**trigger**. The panel comes with your hand until you let go, keeping the
-distance and bearing it had when you caught it. Let go while still moving and you
-have thrown it away, and it is gone.
+## Putting it where you want it
+
+Point at the strip along the top of the panel and hold the **trigger**. The panel
+comes with your hand until you let go, keeping the distance, bearing and angle it
+had when you caught it — so you can tilt one to read from below, or turn one to
+sit off to your side.
 
 The strip is there because everywhere else on the panel is a control, and a press
 on a control is a click. It is the one part of the surface that does nothing, so
 it is the one part that can mean "pick this up".
 
-Pulling the small panel **toward you** by a good arm's length turns it into the
-big one. Carrying it anywhere else leaves it small, which is the point of
-carrying it.
-
-It keeps the angle you hold it at, so you can tilt one to read from below or
-turn one to sit off to your side.
+**Moving it only moves it.** It will not change size, change mode, or disappear
+because of how you happened to move your hand. What is showing is something you
+ask for, by key or out loud.
 
 ## Curved
 

@@ -115,20 +115,6 @@ const PANEL_PIXELS: (u32, u32) = (1900, 1200);
 /// whole point of a surface meant to be read without looking directly at it.
 const MINI_PIXELS: (u32, u32) = (640, 280);
 
-/// How much closer the small panel has to be pulled before it opens, in metres.
-///
-/// A quarter of a metre is a deliberate tug toward yourself and not something that happens while
-/// putting the panel somewhere. The first attempt measured speed instead, which fired on any real
-/// movement at all: the small panel could not be carried across the cockpit without becoming the
-/// big one on the way.
-const PULL: f32 = 0.25;
-
-/// How fast a hand has to be moving to count as a flick, in metres per second.
-///
-/// Above what a hand does while holding something still, and below what it takes to throw
-/// something. Set too low, putting the panel down dismisses it.
-const FLICK: f32 = 1.6;
-
 /// Starts the caption layer and the panel.
 ///
 /// Returns immediately. Everything after this happens on its own thread, and failure there costs
@@ -365,11 +351,6 @@ struct Grab {
     /// feel attached rather than dragged: it keeps the distance, the bearing and the angle it had
     /// when it was caught, instead of snapping to some fixed place in front of the hand.
     offset: glam::Affine3A,
-    /// How far the panel was from the Commander's head when it was taken, in metres.
-    ///
-    /// Kept so that pulling the small panel open can be measured against where it started rather
-    /// than against a fixed distance, which would depend on where they happened to put it.
-    reach: f32,
 }
 
 /// The hand whose aim lands on the panel, nearest hit winning.
@@ -455,13 +436,20 @@ impl Panel {
 
         let typed = self.keyboard.typed(wants);
 
-        if !typed.is_empty() {
-            if !self.typed_anything {
-                tracing::info!(target: "ward::vr", "typing is reaching the panel");
-                self.typed_anything = true;
-            }
+        if !typed.is_empty() && !self.typed_anything {
+            tracing::info!(target: "ward::vr", "typing is reaching the panel");
+            self.typed_anything = true;
+        }
 
-            art.typed(&typed);
+        for one in &typed {
+            art.clipboard(one);
+        }
+
+        // What a cut or a copy asked for, from the frame before this one. egui answers on the pass
+        // after the shortcut arrives, so this is always one frame behind and that is fine: nobody
+        // pastes faster than a sixtieth of a second after copying.
+        if let Some(text) = art.copied() {
+            crate::keys::clipboard::write(&text);
         }
 
         self.keyboard(layer, art);
@@ -680,7 +668,13 @@ impl Panel {
         }
     }
 
-    /// Carries the panel while the trigger is held on it, and dismisses it on a flick.
+    /// Carries the panel while the trigger is held on it.
+    ///
+    /// **Moving it moves it, and does nothing else.** Carrying used to be able to change which
+    /// mode was showing and to throw the panel away, and neither survived contact: a surface that
+    /// changes into something else while being put somewhere is a surface nobody can put anywhere.
+    /// What mode is showing is asked for, by the key or out loud, and never inferred from how a
+    /// hand happened to move.
     ///
     /// **The trigger, not the grip.** An overlay application is told about the trigger, because
     /// SteamVR delivers it as an ordinary mouse press on the overlay; it is told about no other
@@ -727,15 +721,9 @@ impl Panel {
                     return;
                 };
 
-                // Not held any more. Fast enough at the moment of release and it was thrown away
-                // rather than put down.
+                // Let go. It stays exactly where it was put.
                 if !self.pressed {
                     self.held = None;
-
-                    if hand.speed.length() > FLICK {
-                        tracing::info!(target: "ward::vr", "panel flicked away");
-                        self.change(Mode::Gone, "flicked away");
-                    }
                     return;
                 }
 
@@ -747,25 +735,7 @@ impl Panel {
                 // Nothing re-faces it at the Commander while it is held. That was tried and it is
                 // wrong: a panel forced upright and square cannot be tilted to read from below or
                 // turned to sit at an angle, which is most of what moving one is for.
-                let carried = hand.aim * grab.offset;
-                self.placed = Some(carried);
-
-                // Carrying the small panel toward yourself is how it becomes the big one.
-                //
-                // Measured as distance pulled closer rather than as speed. Speed was the first
-                // attempt and it fired on any real movement at all - the small panel could not be
-                // carried anywhere without turning into the big one halfway. A pull is a specific
-                // thing: the panel ends up meaningfully nearer your head than where you caught it.
-                if self.mode == Mode::Mini
-                    && let Some(head) = session.head()
-                {
-                    let head = glam::Vec3::from(head.translation);
-                    let now = glam::Vec3::from(carried.translation).distance(head);
-
-                    if grab.reach - now > PULL {
-                        self.change(Mode::Big, "pulled open");
-                    }
-                }
+                self.placed = Some(hand.aim * grab.offset);
             }
             // Not carried. A trigger held on the grab strip picks it up.
             None => {
@@ -777,14 +747,9 @@ impl Panel {
                     return;
                 };
 
-                let reach = session.head().map_or(f32::INFINITY, |head| {
-                    glam::Vec3::from(placed.translation).distance(head.translation.into())
-                });
-
                 self.held = Some(Grab {
                     device: hand.device,
                     offset: hand.aim.inverse() * placed,
-                    reach,
                 });
 
                 tracing::info!(target: "ward::vr", device = hand.device, "panel taken hold of");

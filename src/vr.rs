@@ -150,8 +150,6 @@ pub struct Controller {
     /// the Commander can see, so carrying a panel by the handle it is not pointing with would put
     /// it somewhere they did not aim.
     pub aim: Affine3A,
-    /// How fast it is moving, in metres per second. What a flick is made of.
-    pub speed: glam::Vec3,
 }
 
 /// Where a ray met an overlay.
@@ -298,12 +296,10 @@ impl Vr {
             }
 
             let placed = from_openvr(pose.mDeviceToAbsoluteTracking);
-            let velocity = pose.vVelocity.v;
 
             found.push(Controller {
                 device: index,
                 aim: placed * self.grip_to_aim(index),
-                speed: glam::Vec3::new(velocity[0], velocity[1], velocity[2]),
             });
         }
 

@@ -142,6 +142,8 @@ pub struct Renderer {
     scrolled: egui::Vec2,
     /// What was typed since the last frame, already in the toolkit's terms.
     typing: Vec<egui::Event>,
+    /// What a cut or a copy asked to be put on the clipboard, waiting to be collected.
+    copied: Option<String>,
 }
 
 impl Renderer {
@@ -192,6 +194,7 @@ impl Renderer {
             was_pressed: false,
             scrolled: egui::Vec2::ZERO,
             typing: Vec::new(),
+            copied: None,
         }
     }
 
@@ -329,6 +332,27 @@ impl Renderer {
                 _ => {}
             }
         }
+    }
+
+    /// Hands the toolkit one of the clipboard shortcuts.
+    ///
+    /// A cut or a copy is a question rather than an instruction: egui answers it by putting the
+    /// selected text into its output, which [`Self::copied`] hands back for whoever owns the real
+    /// clipboard to write. A paste already carries the text, because reading the clipboard is the
+    /// caller's job and not the toolkit's.
+    pub fn clipboard(&mut self, what: &crate::keys::Typed) {
+        self.typing.push(match what {
+            crate::keys::Typed::Copy => egui::Event::Copy,
+            crate::keys::Typed::Cut => egui::Event::Cut,
+            crate::keys::Typed::Paste(text) => egui::Event::Paste(text.clone()),
+            crate::keys::Typed::Text(text) => egui::Event::Text(text.clone()),
+        });
+    }
+
+    /// Text the toolkit wants put on the clipboard, if a cut or a copy asked for any.
+    #[must_use]
+    pub fn copied(&mut self) -> Option<String> {
+        self.copied.take()
     }
 
     /// Whether anything on the panel is waiting to be typed into.
@@ -517,6 +541,15 @@ impl Renderer {
         self.gpu
             .queue
             .submit(staged.into_iter().chain(std::iter::once(encoder.finish())));
+
+        // What the toolkit wants on the clipboard. It is an answer to the cut or copy handed in
+        // above, and it is the only way out: egui has no clipboard of its own and never will.
+        for command in output.platform_output.commands.drain(..) {
+            let egui::OutputCommand::CopyText(text) = command else {
+                continue;
+            };
+            self.copied = Some(text);
+        }
 
         for id in &output.textures_delta.free {
             self.painter.free_texture(id);

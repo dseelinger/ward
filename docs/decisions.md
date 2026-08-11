@@ -67,18 +67,22 @@ be glanced at. A full panel at parity with the window.
 > overlay key and a new thread rather than a drift — the same argument D4 makes, for the same
 > reason.
 
-## D6 — The big panel answers to voice, hotkey and controller
+## D6 — The panel is summoned two ways, and positioned by hand
 
-Summoned and dismissed three ways, because a Commander in a headset should
-never have to reach for the one that is inconvenient.
+Summoned and dismissed by voice and by a key, so a Commander with their hands on the stick and
+one with a headset on but nothing to say each have a way in. The controllers position it and do
+not summon it.
 
-> accepted — built, and unevenly testable, which is worth writing down rather than implying.
-> Voice goes through an ordinary capability and its tools are tested. The hotkey is a setting,
-> and a test holds it to a key name Ward can actually resolve, because a default it cannot is a
-> hotkey that silently never fires. The gesture is tested nowhere: it needs two tracked
-> controllers, and what it reads — a grip held within reach, then a hand still moving when it
-> lets go — cannot be produced without hands. That third is held by the manual suite and by
-> nothing else.
+Three ways was the original decision, with the controller as the third. It was built and it was
+wrong in use: a surface that changes what it is showing, or disappears, because of how a hand
+moved while putting it somewhere is a surface nobody can put anywhere. Moving a thing moves it.
+What is showing is asked for, and never inferred from a gesture that was aimed at something else.
+
+> accepted — both routes are built and neither is fully testable. Voice goes through an ordinary
+> capability, and its tools are tested. The hotkey is a setting, and a test holds it to a key
+> name Ward can actually resolve, because a default it cannot resolve is a hotkey that silently
+> never fires. Whether either actually reaches a headset is held by the manual suite and by
+> nothing else, because it needs a headset.
 
 ## D7 — Reachable without a microphone or a speaker
 

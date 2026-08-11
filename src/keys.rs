@@ -35,6 +35,26 @@ const KEYS: usize = 256;
 /// typing and would arrive as nothing anyway.
 const FIRST: usize = 0x08;
 
+/// The three letters that mean something with control held. Virtual keys are the ASCII capitals
+/// for letters, whatever the layout prints on them - so these are the keys in the places X, C and
+/// V sit on a US keyboard, which is where every layout puts these three shortcuts anyway.
+const CUT: u16 = b'X' as u16;
+const COPY: u16 = b'C' as u16;
+const PASTE: u16 = b'V' as u16;
+
+/// One thing the Commander did to a text box.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Typed {
+    /// Characters, already in the letters their own layout produces.
+    Text(String),
+    /// Ctrl+C, Ctrl+X, Ctrl+V. The three shortcuts anybody typing into a box expects, and the
+    /// only ones held out of the rule that a modifier means a shortcut for somebody else.
+    Copy,
+    Cut,
+    /// Carries what was on the clipboard, read at the moment it was asked for.
+    Paste(String),
+}
+
 /// Reads what has been typed since the last time it was asked.
 pub struct Keyboard {
     /// What was down last pass, so a key held across two of them is not typed twice.
@@ -58,10 +78,10 @@ impl Keyboard {
     /// `listening` is whether anything on the panel actually wants text. When it goes false the
     /// reader forgets what it saw, so the next box to take focus starts from a clean slate rather
     /// than from keys held while nothing was being typed into.
-    pub fn typed(&mut self, listening: bool) -> String {
+    pub fn typed(&mut self, listening: bool) -> Vec<Typed> {
         if !listening {
             self.primed = false;
-            return String::new();
+            return Vec::new();
         }
 
         let now = read_all();
@@ -71,13 +91,13 @@ impl Keyboard {
         if !self.primed {
             self.down = now;
             self.primed = true;
-            return String::new();
+            return Vec::new();
         }
 
-        let mut typed = String::new();
+        let mut typed = Vec::new();
 
         for key in fresh(&now, &self.down) {
-            typed.push_str(&character(key));
+            typed.extend(what(key));
         }
 
         self.down = now;
@@ -120,6 +140,34 @@ fn read_all() -> [bool; KEYS] {
     }
 
     down
+}
+
+/// What one key press means: a character, or one of the three clipboard shortcuts.
+fn what(key: u16) -> Option<Typed> {
+    let held = |key: u16| unsafe { GetAsyncKeyState(i32::from(key)) } as u16 & 0x8000 != 0;
+
+    // Control is a shortcut for somebody else, with exactly three exceptions - and they are the
+    // three that anybody who has ever used a text box will try first. Alt is never an exception:
+    // there is nothing an overlay wants from it that is worth taking alt-tab away for.
+    if held(VK_CONTROL) {
+        if held(VK_MENU) {
+            return None;
+        }
+
+        return match key {
+            CUT => Some(Typed::Cut),
+            COPY => Some(Typed::Copy),
+            PASTE => Some(Typed::Paste(clipboard::read().unwrap_or_default())),
+            _ => None,
+        };
+    }
+
+    let text = character(key);
+
+    match text.is_empty() {
+        true => None,
+        false => Some(Typed::Text(text)),
+    }
 }
 
 /// What one key produces, on this Commander's own layout.
@@ -236,7 +284,7 @@ mod tests {
         // the panel, not to be typed into it.
         let mut keyboard = Keyboard::default();
 
-        assert_eq!(keyboard.typed(false), "");
+        assert!(keyboard.typed(false).is_empty());
         assert!(
             !keyboard.primed,
             "it should not be comparing against anything"
@@ -283,6 +331,7 @@ mod tests {
 pub mod steal {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+    use super::{COPY, CUT, PASTE};
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_MENU};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -393,11 +442,118 @@ pub mod steal {
             & 0x8000
             != 0;
 
-        if spared || held(VK_CONTROL) || held(VK_MENU) {
+        // Control and alt are shortcuts for whatever has focus, and taking them would cost the
+        // Commander alt-tab while a text box happened to be focused. The three clipboard ones are
+        // the exception: they belong to the box being typed into, and letting them past would
+        // paste into the game instead.
+        let clipboard = matches!(pressed as u16, CUT | COPY | PASTE);
+        let shortcut = held(VK_CONTROL) && !clipboard;
+
+        if spared || shortcut || held(VK_MENU) {
             return unsafe { CallNextHookEx(std::ptr::null_mut(), code, what, data) };
         }
 
         // Taken. Nothing else on the machine sees this key.
         1
+    }
+}
+
+/// The Windows clipboard, for the three shortcuts everybody expects to work in a text box.
+///
+/// Read and written directly, because the panel is not a window and nothing is going to do it on
+/// its behalf. Every call opens the clipboard, does one thing and closes it: it is a system-wide
+/// lock, and an application that holds it is one nothing else can copy or paste while it does.
+pub mod clipboard {
+    use windows_sys::Win32::Foundation::{HANDLE, HGLOBAL};
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+    };
+    use windows_sys::Win32::System::Memory::{
+        GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
+    };
+
+    /// Unicode text, which is the only format Ward reads or writes.
+    const TEXT: u32 = 13;
+
+    /// What is on the clipboard, if it is text.
+    #[must_use]
+    pub fn read() -> Option<String> {
+        if unsafe { OpenClipboard(std::ptr::null_mut()) } == 0 {
+            return None;
+        }
+
+        let handle: HANDLE = unsafe { GetClipboardData(TEXT) };
+
+        let text = if handle.is_null() {
+            None
+        } else {
+            let locked = unsafe { GlobalLock(handle as HGLOBAL) }.cast::<u16>();
+
+            if locked.is_null() {
+                None
+            } else {
+                // SAFETY: Windows guarantees a terminated wide string for `CF_UNICODETEXT`, and
+                // the lock above keeps it in place until it is released below.
+                let mut wide = Vec::new();
+                let mut at = 0isize;
+
+                loop {
+                    let unit = unsafe { *locked.offset(at) };
+                    if unit == 0 {
+                        break;
+                    }
+                    wide.push(unit);
+                    at += 1;
+                }
+
+                unsafe { GlobalUnlock(handle as HGLOBAL) };
+                Some(String::from_utf16_lossy(&wide))
+            }
+        };
+
+        unsafe { CloseClipboard() };
+        text
+    }
+
+    /// Puts text on the clipboard.
+    ///
+    /// The memory handed over is not freed here. Windows takes ownership of it the moment
+    /// `SetClipboardData` succeeds, and freeing it afterwards is a use-after-free in whatever
+    /// pastes next.
+    pub fn write(text: &str) {
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        wide.push(0);
+
+        if unsafe { OpenClipboard(std::ptr::null_mut()) } == 0 {
+            return;
+        }
+
+        unsafe { EmptyClipboard() };
+
+        let bytes = std::mem::size_of_val(wide.as_slice());
+        let block = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) };
+
+        if !block.is_null() {
+            let into = unsafe { GlobalLock(block) }.cast::<u16>();
+
+            if into.is_null() {
+                // Nothing owns the block yet, so it is ours to drop.
+                unsafe { windows_sys::Win32::Foundation::GlobalFree(block) };
+            } else {
+                // SAFETY: the block was allocated at exactly this size a few lines above, and the
+                // lock keeps it in place for the copy.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(wide.as_ptr(), into, wide.len());
+                    GlobalUnlock(block);
+                }
+
+                if unsafe { SetClipboardData(TEXT, block as HANDLE) }.is_null() {
+                    // It was refused, so ownership never passed and the block is still ours.
+                    unsafe { windows_sys::Win32::Foundation::GlobalFree(block) };
+                }
+            }
+        }
+
+        unsafe { CloseClipboard() };
     }
 }

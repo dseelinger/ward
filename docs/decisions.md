@@ -477,3 +477,38 @@ check as its subject.
 > rules are accepted as unenforced deliberately: a check counting lines in an
 > instruction file, and a check reading other checks, are both the third rule's
 > own failure mode.
+
+## D46 — Mutation score sits behind the coverage floors
+
+A floor says a line ran. It does not say anything would notice that line
+changing, and the cheapest way to meet a floor is a test that executes code and
+asserts nothing. Mutation testing is the honest form of what coverage
+approximates: change the code, expect the suite to go red, and treat what
+survives as the work queue. It runs on a schedule rather than on a pull request,
+because it is slow and the answer does not change between two commits. Where a
+survivor can be killed by an invariant rather than an example, the invariant
+wins — it does not have to be derived from the code it is testing, which is the
+one thing a test written by reading the implementation can never claim.
+
+Until something does measure it, the writing rule carries it: a test written to
+reach a floor says which bug it would catch, and behavior that has an entry in
+this record is tested against the entry rather than against the implementation.
+A test derived by reading the code pins what the code does rather than what it
+should do, and preserves a bug as faithfully as it preserves anything else.
+
+> open — nothing runs mutants today, so the floors are the only thing measuring
+> the tests and they cannot see this.
+> [#130](https://github.com/dseelinger/ward/issues/130)
+
+## D47 — A silenced test says why, in the attribute
+
+A muted test is worse than one that was never written: it reads as coverage, it
+is counted in the run, and it teaches whoever finds it that a green build with a
+hole in it is normal. Ignoring a test is allowed, because a test that genuinely
+needs the wire or hardware no runner has is a real thing. The reason goes where
+the mute is, the way an exempt file carries one and a decision carries a state.
+
+> enforced — `check.sh` fails on a bare `#[ignore]` under `src/` and `tests/`,
+> and passes `#[ignore = "..."]`. There are none of either today, which is why
+> it went in now rather than once there was one to argue about. Watched failing,
+> and watched passing on the reasoned form.

@@ -301,12 +301,64 @@ fn break_at(text: &str, room: usize) -> usize {
 
 /// Breaks a reply into the pieces that will be spoken, in order.
 pub fn into_pieces(text: &str) -> Vec<String> {
+    pieces_of(text, true)
+}
+
+/// The same, for text that continues something Ward is already saying.
+///
+/// The small first piece buys a fast start, and there is nothing left to buy
+/// once the voice is already talking — so a continuation takes the larger size
+/// throughout and spends fewer connections on the rest of the reply.
+pub fn pieces_after_the_start(text: &str) -> Vec<String> {
+    pieces_of(text, false)
+}
+
+/// Whatever of a reply still being written is finished enough to say.
+///
+/// Returns the pieces and how many bytes of the buffer they used.
+///
+/// Only text up to the **last sentence ending** is considered, and a sentence
+/// ending means punctuation with whitespace after it — not punctuation at the
+/// end of what has arrived so far. That distinction is the whole function. The
+/// splitter looks for the end of a sentence and settles for the end of the text
+/// when it cannot find one, which is right for a finished reply and wrong for
+/// one still arriving: the boundary it picks inside an unfinished sentence
+/// moves as the rest of the words turn up, and a piece already handed to the
+/// voice cannot be taken back.
+pub fn settled(buffer: &str, first: bool) -> (Vec<String>, usize) {
+    let mut ends = None;
+
+    for (at, c) in buffer.char_indices() {
+        if !matches!(c, '.' | '!' | '?') {
+            continue;
+        }
+
+        let after = at + c.len_utf8();
+
+        // `is_some_and` rather than `is_none_or`: running out of buffer is
+        // exactly the case this must not treat as the end of a sentence.
+        if buffer[after..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+        {
+            ends = Some(after);
+        }
+    }
+
+    match ends {
+        Some(end) => (pieces_of(&buffer[..end], first), end),
+        None => (Vec::new(), 0),
+    }
+}
+
+fn pieces_of(text: &str, first: bool) -> Vec<String> {
     let mut pieces: Vec<String> = Vec::new();
     let mut piece = String::new();
     let mut rest = text.trim();
 
     while !rest.is_empty() {
-        let room = match pieces.is_empty() {
+        let room = match pieces.is_empty() && first {
             true => FIRST,
             false => THEN,
         };
@@ -793,6 +845,58 @@ mod tests {
             sentence_end("No punctuation at all"),
             "No punctuation at all".len()
         );
+    }
+
+    #[test]
+    fn a_sentence_still_being_written_is_not_ready_to_say() {
+        // The rule the whole of streamed speech rests on. `sentence_end` settles
+        // for the end of the text when it finds no punctuation, which is right
+        // for a finished reply and wrong for one still arriving - and a piece
+        // already handed to the voice cannot be taken back.
+        assert_eq!(settled("Forty tons remaining", true), (Vec::new(), 0));
+
+        // Nor when the punctuation is the last thing to have arrived: the next
+        // chunk could be "32 light years" and make it a figure.
+        assert_eq!(settled("The distance is 127.", true), (Vec::new(), 0));
+    }
+
+    #[test]
+    fn a_finished_sentence_is_ready_before_the_rest_of_the_reply() {
+        let (ready, used) = settled("Forty tons remaining. That is enough for", true);
+
+        assert_eq!(ready, vec!["Forty tons remaining."]);
+
+        // And what it used is exactly the sentence, so the unfinished words
+        // after it stay in the buffer to be said later rather than twice.
+        assert_eq!(
+            &"Forty tons remaining. That is enough for"[used..],
+            " That is enough for"
+        );
+    }
+
+    #[test]
+    fn nothing_is_lost_or_repeated_across_a_streamed_reply() {
+        // The pieces are played one after another, so a reply assembled from a
+        // buffer that grows has to come out as the same words in the same order
+        // as one that arrived whole.
+        let reply =
+            "Docking now. Watch the pad number, it is easy to miss. The station is busy tonight.";
+
+        let mut buffer = String::new();
+        let mut spoken: Vec<String> = Vec::new();
+
+        // Fed a few characters at a time, the way it actually arrives.
+        for chunk in reply.as_bytes().chunks(7) {
+            buffer.push_str(std::str::from_utf8(chunk).unwrap());
+
+            let (ready, used) = settled(&buffer, spoken.is_empty());
+            buffer.drain(..used);
+            spoken.extend(ready);
+        }
+
+        spoken.extend(pieces_after_the_start(&buffer));
+
+        assert_eq!(spoken.join(" "), reply, "streamed: {spoken:?}");
     }
 
     #[test]

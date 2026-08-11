@@ -78,7 +78,14 @@ pub type Ask = Arc<dyn Fn(Vec<Message>, String, UnboundedSender<Event>) -> Runni
 /// Returns a channel that fires once when speaking has stopped, however it
 /// stopped. The engine waits on that rather than on a clock, which is what
 /// keeps the speech stream moving at the pace of the voice.
-pub type Speak = Arc<dyn Fn(&Act, &Settings) -> UnboundedReceiver<()> + Send + Sync>;
+///
+/// The receiver carries the rest of a reply that is still being written, and is
+/// absent for anything Ward already has whole.
+pub type Speak = Arc<
+    dyn Fn(&Act, Option<UnboundedReceiver<String>>, &Settings) -> UnboundedReceiver<()>
+        + Send
+        + Sync,
+>;
 
 /// What the Commander asked for, on its way in from the window.
 pub enum Intent {
@@ -175,6 +182,20 @@ pub struct Engine {
 
     /// The turn in flight, if there is one.
     events: Option<UnboundedReceiver<Event>>,
+    /// When it started, for measuring the wait the Commander actually sits
+    /// through rather than the part that is convenient to time.
+    turn_started: Option<std::time::Instant>,
+    /// The reply as it is being written, with whatever has already been handed
+    /// to the voice taken off the front.
+    sayable: String,
+    /// Where a sentence goes once it is finished enough to say. Dropping this
+    /// is how the voice is told there is no more coming.
+    saying: Option<UnboundedSender<String>>,
+    /// The other end, until the speech stream is ready to take it.
+    arriving: Option<UnboundedReceiver<String>>,
+    /// Whether this reply has already been handed to the speech stream. It is
+    /// offered once, when its first sentence is ready, and grows after that.
+    offered: bool,
     /// Signals that speaking finished, so the stream can move on. Silence falls
     /// back to the caption's own timing, which is what keeps a failure to speak
     /// from also freezing what is on screen.
@@ -242,6 +263,11 @@ impl Engine {
             listening: false,
             showed_something: false,
             events: None,
+            turn_started: None,
+            sayable: String::new(),
+            saying: None,
+            arriving: None,
+            offered: false,
             spoken: None,
             spoke_at: Duration::ZERO,
             speech: Arbiter::default(),
@@ -350,7 +376,11 @@ impl Engine {
             None => match self.speech.next(now) {
                 Some(act) => {
                     self.spoke_at = now;
-                    self.spoken = Some((self.speak)(&act, &self.settings));
+                    // Taken rather than borrowed: the words still being written
+                    // belong to this act and to nothing after it. Anything else
+                    // on the stream - an alert, a callout - carries its own text
+                    // and gets nothing here.
+                    self.spoken = Some((self.speak)(&act, self.arriving.take(), &self.settings));
                     true
                 }
                 None => false,
@@ -501,6 +531,17 @@ impl Engine {
         self.pending = Some(String::new());
         self.showed_something = false;
 
+        // Cleared rather than assumed empty. A reply the speech stream refused
+        // would otherwise leave its half-written words here to be spoken as
+        // though they belonged to the question just asked.
+        self.sayable.clear();
+        self.offered = false;
+        self.turn_started = Some(std::time::Instant::now());
+
+        let (words, arriving) = unbounded_channel();
+        self.saying = Some(words);
+        self.arriving = Some(arriving);
+
         let (tx, rx) = unbounded_channel();
         self.events = Some(rx);
 
@@ -529,6 +570,8 @@ impl Engine {
                 if let Some(pending) = self.pending.as_mut() {
                     pending.push_str(&chunk);
                 }
+                self.sayable.push_str(&chunk);
+                self.say_what_is_finished();
             }
             Event::Using(tool) => self.using = Some(tool),
             Event::Done { stop_reason } => {
@@ -549,11 +592,38 @@ impl Engine {
                         "turn finished"
                     );
 
-                    let now = diag::since_start();
-                    self.speech.offer(
-                        Act::text(Speaker::Ward, Register::Reply, text.clone(), now),
-                        now,
-                    );
+                    match self.offered {
+                        // Already talking. What is left is the rest of a
+                        // sentence and whatever came after it, and it goes to
+                        // the voice that is part way through saying the front
+                        // of the same reply.
+                        true => {
+                            let rest = std::mem::take(&mut self.sayable);
+
+                            if let Some(saying) = self.saying.as_ref() {
+                                for piece in voice::pieces_after_the_start(&rest) {
+                                    let _ = saying.send(piece);
+                                }
+                            }
+                        }
+                        // Short enough, or written without a sentence ending in
+                        // it, that nothing was ever finished enough to start on.
+                        // Said the way it always was.
+                        false => {
+                            // Dropped before the act is offered. This channel
+                            // was opened for a reply that turned out to arrive
+                            // whole, and handing it over would give the voice a
+                            // closed and empty source to read the reply from -
+                            // which is silence, with the answer on screen.
+                            self.arriving = None;
+
+                            let now = diag::since_start();
+                            self.speech.offer(
+                                Act::text(Speaker::Ward, Register::Reply, text.clone(), now),
+                                now,
+                            );
+                        }
+                    }
 
                     self.history.push(Message {
                         role: Role::Assistant,
@@ -561,6 +631,10 @@ impl Engine {
                     });
                 }
 
+                // Dropped, which is how the voice is told the reply is complete
+                // and it can stop waiting for more.
+                self.saying = None;
+                self.sayable.clear();
                 self.using = None;
                 self.events = None;
             }
@@ -578,6 +652,13 @@ impl Engine {
                 // Drop the partial reply. Keeping it would leave a fragment on
                 // screen that looks like an answer and is not one.
                 self.pending = None;
+                // And stop the voice waiting for the rest of a reply that is not
+                // coming. A turn can fail after Ward has already started saying
+                // it: what was said was true when it was said, and the sentence
+                // in the middle of being written is not.
+                self.saying = None;
+                self.arriving = None;
+                self.sayable.clear();
                 self.using = None;
                 // Take the question back out of the history too, so a retry does
                 // not send it twice.
@@ -587,6 +668,66 @@ impl Engine {
         }
 
         true
+    }
+
+    /// Hands the voice whatever of the reply is finished enough to say.
+    ///
+    /// Ward used to wait for the model to stop writing before synthesizing a
+    /// word of the answer, and that wait is dead air the Commander sits through
+    /// with the reply already on a screen they cannot see from inside a headset.
+    /// It is one to two seconds on a short answer and several on a long one, and
+    /// none of it buys anything: a sentence that is finished is finished,
+    /// whatever is still being written after it.
+    ///
+    /// The speech stream is offered the reply **once**, when its first sentence
+    /// is ready. The rest arrives on a channel to the voice already saying it,
+    /// which is what keeps one reply one act — so barge-in still cuts the whole
+    /// of it, and the pieces still stay a fetch ahead of the words being spoken
+    /// rather than pausing at every sentence.
+    fn say_what_is_finished(&mut self) {
+        let (ready, used) = voice::settled(&self.sayable, !self.offered);
+
+        if ready.is_empty() {
+            return;
+        }
+
+        self.sayable.drain(..used);
+
+        let Some(saying) = self.saying.as_ref() else {
+            return;
+        };
+
+        if !self.offered {
+            self.offered = true;
+
+            // What the Commander waits through, measured where they start
+            // waiting. This used to be the same instant as "turn finished",
+            // which is the whole of what this change moves.
+            if let Some(started) = self.turn_started {
+                tracing::info!(
+                    target: "ward::turn",
+                    ms = started.elapsed().as_millis() as u64,
+                    chars = ready[0].chars().count(),
+                    "first sentence handed to the voice"
+                );
+            }
+
+            // The act carries only what is ready. Nothing reads its text except
+            // the backstop that retires a caption when no voice ever reported
+            // finishing, and a voice is about to be given this one.
+            let now = diag::since_start();
+            self.speech.offer(
+                Act::text(Speaker::Ward, Register::Reply, ready.join(" "), now),
+                now,
+            );
+        }
+
+        for piece in ready {
+            // Failure here means the voice stopped listening - cut off, or never
+            // started. The turn carries on either way; what it is writing still
+            // has to reach the screen and the history.
+            let _ = saying.send(piece);
+        }
     }
 
     /// Reads whatever the game has written since last time.
@@ -729,7 +870,7 @@ async fn finished(rx: &mut Option<UnboundedReceiver<()>>) {
 /// spoke, but a companion that stops working because it could not speak is
 /// worse than both.
 fn speaking(gear: Gear) -> Speak {
-    Arc::new(move |act, settings| {
+    Arc::new(move |act, arriving, settings| {
         let (tx, rx) = unbounded_channel();
 
         let Body::Text(text) = &act.body else {
@@ -762,7 +903,24 @@ fn speaking(gear: Gear) -> Speak {
             // service produces audio faster than it plays, so the opening
             // sentence was ready almost immediately every time and then waited
             // for the rest of the paragraph to be made.
-            let pieces = voice::into_pieces(&text);
+            //
+            // Where the words come from is the difference between a reply and
+            // everything else Ward says. A reply is still being written when it
+            // starts being spoken, so its pieces arrive one finished sentence at
+            // a time; an alert or a callout is a whole line already and is
+            // broken up here.
+            let mut words = match arriving {
+                Some(arriving) => arriving,
+                None => {
+                    let (whole, one_at_a_time) = unbounded_channel();
+
+                    for piece in voice::into_pieces(&text) {
+                        let _ = whole.send(piece);
+                    }
+
+                    one_at_a_time
+                }
+            };
 
             playing.begin();
             hush.speaking();
@@ -782,10 +940,12 @@ fn speaking(gear: Gear) -> Speak {
 
             {
                 let playing = playing.clone();
-                let pieces = pieces.clone();
 
                 tokio::spawn(async move {
-                    for piece in pieces {
+                    // Ends when the reply does: the engine drops its end of this
+                    // once the model has stopped writing, and a closed channel
+                    // is how the fetcher learns there is nothing more coming.
+                    while let Some(piece) = words.recv().await {
                         if playing.cut_off() {
                             break;
                         }
@@ -835,7 +995,7 @@ fn speaking(gear: Gear) -> Speak {
 
             while let Some((piece, speech)) = waiting.recv().await {
                 if playing.cut_off() {
-                    tracing::info!(target: "ward::voice", spoken, of = pieces.len(), "cut off");
+                    tracing::info!(target: "ward::voice", spoken, "cut off");
                     break;
                 }
 
@@ -851,10 +1011,13 @@ fn speaking(gear: Gear) -> Speak {
                 if first_audio.is_none() {
                     let ms = started.elapsed().as_millis() as u64;
                     first_audio = Some(ms);
+                    // No total to report any more. A reply is spoken while it is
+                    // still being written, so how many pieces it will come to is
+                    // not known yet - and a count that was only ever a
+                    // denominator is not worth waiting for the answer to.
                     tracing::info!(
                         target: "ward::voice",
                         ms,
-                        pieces = pieces.len(),
                         chars = piece.chars().count(),
                         "first audio ready"
                     );
@@ -926,19 +1089,66 @@ mod tests {
         })
     }
 
+    /// A model that says one thing, waits to be let go, and then finishes.
+    ///
+    /// The waiting is the point. A reply that arrives all at once cannot tell
+    /// whether Ward spoke while it was still being written or merely spoke
+    /// quickly, and that difference is the whole of what is being claimed.
+    fn dawdling(first: &str, rest: &str) -> (Ask, Arc<tokio::sync::Notify>) {
+        let go = Arc::new(tokio::sync::Notify::new());
+        let waits = go.clone();
+
+        let first = first.to_string();
+        let rest = rest.to_string();
+
+        let ask: Ask = Arc::new(move |_history, _situation, out| {
+            let first = first.clone();
+            let rest = rest.clone();
+            let waits = waits.clone();
+
+            Box::pin(async move {
+                let _ = out.send(Event::Text(first));
+                waits.notified().await;
+                let _ = out.send(Event::Text(rest));
+                let _ = out.send(Event::Done { stop_reason: None });
+            })
+        });
+
+        (ask, go)
+    }
+
     /// A voice that reports finishing immediately, and writes down what it was
     /// given.
+    ///
+    /// A reply arrives as pieces on a channel while it is still being written,
+    /// and everything else arrives whole. Both are written down the same way, so
+    /// a test can ask what Ward said without knowing which it was.
     fn listening_voice() -> (Speak, Said) {
         let said: Said = Arc::new(Mutex::new(Vec::new()));
         let heard = said.clone();
 
-        let speak: Speak = Arc::new(move |act, _settings| {
-            if let Body::Text(text) = &act.body {
-                heard.lock().unwrap().push(text.clone());
+        let speak: Speak = Arc::new(move |act, arriving, _settings| {
+            let (tx, rx) = unbounded_channel();
+
+            match arriving {
+                Some(mut arriving) => {
+                    let heard = heard.clone();
+
+                    tokio::spawn(async move {
+                        while let Some(piece) = arriving.recv().await {
+                            heard.lock().unwrap().push(piece);
+                        }
+                        let _ = tx.send(());
+                    });
+                }
+                None => {
+                    if let Body::Text(text) = &act.body {
+                        heard.lock().unwrap().push(text.clone());
+                    }
+                    let _ = tx.send(());
+                }
             }
 
-            let (tx, rx) = unbounded_channel();
-            let _ = tx.send(());
             rx
         });
 
@@ -949,6 +1159,17 @@ mod tests {
     /// anywhere in the process.
     fn engine(
         events: Vec<Event>,
+    ) -> (
+        Handle,
+        Said,
+        UnboundedSender<listen::Voiced>,
+        Arc<AtomicUsize>,
+    ) {
+        engine_asking(answering(events))
+    }
+
+    fn engine_asking(
+        ask: Ask,
     ) -> (
         Handle,
         Said,
@@ -989,7 +1210,7 @@ mod tests {
             },
         );
 
-        engine.ask = Some(answering(events));
+        engine.ask = Some(ask);
         engine.speak = speak;
 
         (launch(engine, Some(heard)), said, mic, woken)
@@ -1048,6 +1269,58 @@ mod tests {
         assert!(
             woken.load(Ordering::Relaxed) > 0,
             "the window was never woken"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_opening_sentence_is_spoken_while_the_rest_is_still_being_written() {
+        // Ward used to wait for the model to stop writing before synthesizing a
+        // word, and a Commander in a headset sat through all of it in silence
+        // with the answer on a screen behind the game.
+        let (ask, go) = dawdling(
+            "Forty tons remaining. ",
+            "That is enough for three more jumps.",
+        );
+
+        let (ward, said, mic, _) = engine_asking(ask);
+
+        mic.send(listen::Voiced::Words("how much fuel".into()))
+            .unwrap();
+
+        assert!(
+            until(|| !said.lock().unwrap().is_empty()).await,
+            "the opening sentence never reached the voice"
+        );
+
+        assert_eq!(said.lock().unwrap()[0], "Forty tons remaining.");
+
+        // The assertion the rest of this test exists for. Without it the one
+        // above passes just as well against a Ward that waited for the whole
+        // reply and was simply quick about it.
+        assert!(
+            ward.view().streaming,
+            "the model had already finished writing, so speaking early proves nothing"
+        );
+
+        go.notify_one();
+
+        assert!(
+            until(|| said.lock().unwrap().len() == 2).await,
+            "the rest of the reply never followed: {:?}",
+            said.lock().unwrap()
+        );
+
+        assert_eq!(
+            said.lock().unwrap()[1],
+            "That is enough for three more jumps."
+        );
+
+        // And what is remembered is the whole reply, not the part of it that
+        // happened to be finished first.
+        assert!(until(|| ward.view().history.len() == 2).await);
+        assert_eq!(
+            ward.view().history[1].text,
+            "Forty tons remaining. That is enough for three more jumps."
         );
     }
 

@@ -20,15 +20,6 @@ name: mutants
 
 on:
   workflow_dispatch:
-    inputs:
-      files:
-        description: >
-          Which files to mutate. Defaults to the pure tier. Give a
-          space-separated list to look somewhere else.
-        type: string
-        default: >-
-          src/bindings.rs src/captions.rs src/outside.rs src/schema.rs
-          src/shown.rs src/speech.rs src/sse.rs
 
   # Weekly, because the answer does not change between two commits but it does
   # change over a month of them, and a survivor nobody looks for is a survivor
@@ -55,22 +46,11 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-mutants
 
+      # The floor and the file list both live in the script, so a run here and
+      # a run on somebody's machine are the same run.
       - name: Change the code and see whether anything objects
         shell: bash
-        run: |
-          files="${{ inputs.files }}"
-          files="${files:-src/bindings.rs src/captions.rs src/outside.rs src/schema.rs src/shown.rs src/speech.rs src/sse.rs}"
-
-          args=""
-          for file in $files; do
-            args="$args --file $file"
-          done
-
-          # No floor yet, deliberately. D38's own lesson is that a number picked
-          # in advance is a number nobody has watched fail, so this reports and
-          # the survivors are read. A floor goes in once there is a score that
-          # has been looked at.
-          cargo mutants -j 4 $args
+        run: sh check/mutants.sh
 
       # Kept whatever the result, because the interesting run is the one that
       # found something.

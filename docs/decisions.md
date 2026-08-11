@@ -509,13 +509,13 @@ this record is tested against the entry rather than against the implementation.
 A test derived by reading the code pins what the code does rather than what it
 should do, and preserves a bug as faithfully as it preserves anything else.
 
-> open — the runner exists and the score is recorded, and no floor is held yet.
-> `.github/workflows/mutants.yml` runs weekly and on demand; `check/mutants.md`
-> carries where it landed on the pure tier and shows why the three that survive
-> cannot be killed. The floor waits for a few runs of history, which is the
-> decision's own instruction: a number picked before anybody watched it is a
-> number nobody has watched fail.
-> [#130](https://github.com/dseelinger/ward/issues/130)
+> enforced — `check/mutants.sh`, run weekly and on demand by
+> `.github/workflows/mutants.yml`. The floor is 92%, five points under where the
+> pure tier stood when it went in, which was every killable mutant caught. The
+> gap is there so one survivor is something read in the output rather than a
+> build to stop and fix. `check/mutants.md` carries the score and how it got
+> there, including two survivors that were written up as unkillable and were
+> not.
 
 ## D47 — A silenced test says why, in the attribute
 

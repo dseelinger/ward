@@ -111,11 +111,14 @@ pub fn as_plain_text(raw: &str) -> String {
 
             // Heading and bullet markers, and only where they mean that. A hash
             // inside a sentence is a hash, and a hyphenated word is one word.
+            // The spaces after the marker are deliberately left where they
+            // are. Eating them here reads as thorough and does nothing: the
+            // last line of this function collapses runs of whitespace, so a
+            // space dropped here and a space dropped there produce the same
+            // string. It was written, and nothing could tell it from its own
+            // absence — which is a finding rather than a line to keep.
             '#' | '-' if fresh_line => {
                 while chars.peek() == Some(&'#') {
-                    chars.next();
-                }
-                while chars.peek() == Some(&' ') {
                     chars.next();
                 }
                 fresh_line = false;
@@ -396,6 +399,50 @@ mod tests {
             even, unchanged,
             "the word fits below but moving it widens the gap"
         );
+    }
+
+    #[test]
+    fn a_word_that_would_overflow_stays_put_even_when_moving_it_would_even_things_up() {
+        // The case where the length limit is the only thing saying no. Every
+        // other test of this rule has the gap saying no as well, which means
+        // the limit could be doing nothing and nothing would show it.
+        //
+        // Reaching it needs a top line longer than the allowance, which the
+        // caller cannot currently produce - it only ever hands over lines it
+        // wrapped itself. That is what the guard is for: this function's
+        // promise is that the lower line fits, and that promise should hold for
+        // whatever it is handed rather than only for what one caller happens to
+        // pass today.
+        let top = format!("{} {}", "a".repeat(40), "b".repeat(5));
+        let bottom = "c".repeat(38);
+
+        let mut lines = vec![top, bottom];
+        let unchanged = lines.clone();
+
+        bottom_heavy(&mut lines);
+
+        assert_eq!(
+            lines, unchanged,
+            "moving the word would even the two lines up and overflow the lower one"
+        );
+    }
+
+    #[test]
+    fn a_word_that_lands_exactly_on_the_allowance_is_moved() {
+        // One character the other side of the same limit. Exactly at the
+        // allowance is legal, so the move happens - and this is the pair to the
+        // test above, because a limit tested only from the far side is a limit
+        // that could be off by one in the direction nobody looked.
+        let top = format!("{} {}", "a".repeat(40), "bb");
+        let bottom = "c".repeat(39);
+
+        let mut lines = vec![top, bottom];
+
+        bottom_heavy(&mut lines);
+
+        assert_eq!(lines[0], "a".repeat(40));
+        assert_eq!(lines[1], format!("bb {}", "c".repeat(39)));
+        assert_eq!(lines[1].chars().count(), PER_LINE);
     }
 
     #[test]

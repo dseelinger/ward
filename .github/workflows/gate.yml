@@ -46,9 +46,19 @@ jobs:
       #
       # Saved even when the job fails, because the runs worth caching hardest
       # are the ones being iterated on.
+      # The key names the C runtime settings on purpose, and has to be changed
+      # whenever they are.
+      #
+      # What is cached includes the speech model's C++ build directory, and
+      # CMake keeps its configuration in there. The build script does not rerun
+      # when one of those variables changes, so a run that restores this cache
+      # builds the C++ the way the last run configured it and ignores the
+      # settings entirely. The failure looks exactly like the settings not
+      # working, which is how an hour goes into the wrong question - and it
+      # happened twice on the way here, once locally and once in this workflow.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: static-crt
+          key: static-crt-MultiThreaded-cmp0091-new
           cache-on-failure: true
 
       - name: What version is this

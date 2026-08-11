@@ -33,6 +33,42 @@ use crate::shown;
 
 pub use crate::panel::Mode;
 
+/// How tall the strip along the top of the panel is, in points.
+///
+/// It exists so that a press has somewhere to mean "pick this up". Everything else on this surface
+/// is a widget, and on a surface made only of widgets there is no press that could ever start a
+/// grab — asking the toolkit whether it wants the pointer answers yes everywhere, which is the
+/// same as answering nowhere.
+///
+/// Drawn in the shared tree rather than only in the headset, because there is one tree. On the
+/// desktop it is a title bar that happens to do nothing, which is what a title bar mostly is.
+pub const GRAB_STRIP: f32 = 26.0;
+
+/// Draws the strip a press can pick the panel up by.
+fn grab_strip(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), GRAB_STRIP),
+        egui::Sense::hover(),
+    );
+
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0.0, ui.visuals().faint_bg_color);
+
+    // Three short lines in the middle, which is what every surface anybody has ever dragged looks
+    // like. There is no text: this is the one part of the panel that says nothing.
+    let middle = rect.center();
+    let stroke = egui::Stroke::new(1.0, ui.visuals().weak_text_color());
+
+    for step in -1..=1 {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "three lines, and the count is a literal"
+        )]
+        let y = middle.y + (step as f32) * 4.0;
+        painter.hline((middle.x - 22.0)..=(middle.x + 22.0), y, stroke);
+    }
+}
+
 /// Everything a surface holds that the engine does not.
 ///
 /// All of it is text mid-edit and which tab is open. None of it is the truth
@@ -89,6 +125,10 @@ const GLANCE_INK: egui::Color32 = egui::Color32::from_rgb(235, 235, 235);
 /// alternative is a black slab hanging in the cockpit with four lines in the top of it, which is
 /// the exact mistake the caption layer already made once.
 fn mini(ui: &mut egui::Ui, view: &View, out: &mut Vec<Intent>) {
+    // The same strip as the big panel, in the same place, so picking either one up is the same
+    // movement rather than two things to learn.
+    egui::Panel::top("handle").show(ui, grab_strip);
+
     egui::Area::new(egui::Id::new("ward-mini"))
         .anchor(egui::Align2::LEFT_TOP, egui::vec2(0.0, 0.0))
         .show(ui.ctx(), |ui| {
@@ -176,6 +216,8 @@ fn big(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<Intent>)
     // A bar rather than a button tucked somewhere: settings is the second half
     // of what this surface is for, and a Commander whose microphone is wrong
     // needs to reach it without hunting.
+    egui::Panel::top("handle").show(ui, grab_strip);
+
     egui::Panel::top("where").show(ui, |ui| {
         ui.add_space(4.0);
         ui.horizontal(|ui| {

@@ -115,11 +115,11 @@ const PANEL_PIXELS: (u32, u32) = (1900, 1200);
 /// whole point of a surface meant to be read without looking directly at it.
 const MINI_PIXELS: (u32, u32) = (640, 280);
 
-/// How long a mode change is left alone before another gesture can be read.
+/// How fast a hand has to be moving to pull the small panel open, in metres per second.
 ///
-/// A grab is held across many frames and a flick is a hand that stays fast for a tenth of a
-/// second. Without a pause after each change, one movement reads as several.
-const SETTLING: Duration = Duration::from_millis(400);
+/// Slower than a flick, because opening it is a deliberate tug rather than a throw, and faster
+/// than the drift of a hand holding something still.
+const PULL: f32 = 0.6;
 
 /// How fast a hand has to be moving to count as a flick, in metres per second.
 ///
@@ -301,8 +301,17 @@ struct Panel {
     applied_mode: Option<Mode>,
     applied_place: Option<glam::Affine3A>,
     /// Whether the trigger is down, which the renderer needs as a level and OpenVR reports as two
-    /// edges.
+    /// edges. It is also what carries the panel, because it is the only button that arrives.
     pressed: bool,
+    /// Where the ray last was, in the image's own pixels, so a press knows what it landed on.
+    pointer: Option<(f32, f32)>,
+    /// Whether the last press landed on the strip along the top rather than on the interface.
+    ///
+    /// A panel that is entirely widgets has nowhere for a press to mean "pick this up", and asking
+    /// the toolkit whether it wants the pointer does not help: on a surface made only of widgets
+    /// the answer is always yes, so a grab could never start. So there is one strip that is not a
+    /// widget, and this remembers whether the press was on it.
+    on_strip: bool,
     /// A hand that is holding the panel, and where it was when it took hold.
     held: Option<Grab>,
     /// The key that summons the panel, and what it last read — so the press is acted on and the
@@ -332,12 +341,34 @@ struct Panel {
 /// A hand that has taken hold of the panel.
 #[derive(Clone, Copy)]
 struct Grab {
-    /// How far down the ray the panel was when it was taken hold of.
+    /// Which device is carrying it. A second hand pressing cannot take over from this one.
+    device: u32,
+    /// Where the panel sat in the hand's own space at the moment it was taken.
     ///
-    /// Held rather than recomputed, so the panel keeps its distance while it is carried. Without
-    /// it the panel would slide up the ray to a fixed distance the moment it was grabbed, which
-    /// reads as it jumping at you.
-    reach: f32,
+    /// Frozen once and multiplied through every frame after. That is what makes a carried panel
+    /// feel attached rather than dragged: it keeps the distance and the bearing it had when it
+    /// was caught, instead of snapping to some fixed place in front of the hand.
+    offset: glam::Affine3A,
+}
+
+/// The hand whose aim lands on the panel, nearest hit winning.
+///
+/// Asked of OpenVR rather than worked out here, so the answer agrees with the cursor SteamVR is
+/// already drawing. This only has to tell one hand from the other, which is a much easier question
+/// than where exactly the ray lands - the two hands are nowhere near each other.
+fn nearest_pointing<'a>(
+    hands: &'a [crate::vr::Controller],
+    layer: &crate::vr::Overlay<'_>,
+) -> Option<&'a crate::vr::Controller> {
+    hands
+        .iter()
+        .filter_map(|hand| {
+            let from = glam::Vec3::from(hand.aim.translation);
+            let along = hand.aim.transform_vector3(glam::Vec3::NEG_Z);
+            layer.hit_by(from, along).map(|hit| (hand, hit.distance))
+        })
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(hand, _)| hand)
 }
 
 impl Panel {
@@ -476,10 +507,27 @@ impl Panel {
 
         for event in arrived {
             match event {
-                crate::vr::Event::Moved { x, y } => art.point_at(Some((x, y))),
+                crate::vr::Event::Moved { x, y } => {
+                    self.pointer = Some((x, y));
+                    art.point_at(Some((x, y)));
+                }
                 crate::vr::Event::Button { down } => {
+                    // Where the press landed decides what it means, and only on the way down. A
+                    // release is the end of whatever the press started, wherever the ray has
+                    // wandered to since.
+                    if down {
+                        self.on_strip = self.pointer.is_some_and(|(_, y)| {
+                            y <= crate::surface::GRAB_STRIP * crate::render::SCALE
+                        });
+                    }
+
                     self.pressed = down;
-                    art.press(down);
+
+                    // A press on the strip is not a click. Handing it to the toolkit as well would
+                    // put focus somewhere and open the keyboard on a surface being carried.
+                    if !self.on_strip {
+                        art.press(down);
+                    }
                 }
                 crate::vr::Event::Scrolled { x, y } => art.scroll(x, y),
                 crate::vr::Event::Typed(text) => {
@@ -553,105 +601,99 @@ impl Panel {
         }
     }
 
-    /// Grab from mini to expand, and flick to dismiss.
+    /// Carries the panel while the trigger is held on it, and dismisses it on a flick.
     ///
-    /// **Aimed rather than reached for.** The first version of this asked whether a hand was
-    /// within a arm's length of the panel's center, which is a test that can never pass: the panel
-    /// is put a metre and a half away so it can be read, and a seated Commander's hand reaches
-    /// about half that. Pointing at it and squeezing is both what works at that distance and what
-    /// every other headset surface already taught them to do.
+    /// **The trigger, not the grip.** An overlay application is told about the trigger, because
+    /// SteamVR delivers it as an ordinary mouse press on the overlay; it is told about no other
+    /// button unless it ships an input manifest naming one. So the button that was chosen first
+    /// was the one button that could never arrive, and the button that already worked - the one
+    /// that clicks the checkboxes - is the one that picks the panel up.
+    ///
+    /// **Which hand pressed is not in the event.** `trackedDeviceIndex` on an overlay mouse event
+    /// is the invalid index, so the press says where on the panel and never who. The hand is found
+    /// by casting each controller's aim at the overlay and taking the nearest hit, which only has
+    /// to tell one hand from the other - and the two hands are nowhere near each other.
     fn gestured(&mut self, session: &crate::vr::Vr, layer: &crate::vr::Overlay<'_>) {
-        if self.placed.is_none() {
+        let Some(placed) = self.placed else {
             return;
-        }
+        };
 
-        // A gesture is many frames long. Without this, the frames after the one that opened the
-        // panel are still a hand moving fast with the grip held, and the same movement would be
-        // read as a grab, an expand and a flick in the space of a fifth of a second.
-        if self.settled.is_some_and(|at| at.elapsed() < SETTLING) {
-            return;
-        }
+        let hands = session.controllers();
 
-        let controllers = session.controllers();
-
-        // Said once, and only once there is something to say. A grab that does nothing because no
-        // controller was ever seen looks exactly like a grab that was seen and ignored, and the
-        // legacy input this reads is the kind of thing SteamVR turns off without telling anybody.
+        // Said once, and only once there is something to say. The census is the whole diagnosis
+        // when there is nothing: "nothing connected" means pick a controller up, and anything else
+        // means they are there and something here is not seeing them.
         if !self.saw_controllers {
-            match controllers.is_empty() {
+            match hands.is_empty() {
                 false => tracing::info!(
                     target: "ward::vr",
-                    controllers = controllers.len(),
-                    "controllers found, so the panel can be grabbed"
+                    controllers = hands.len(),
+                    "controllers found, so the panel can be carried"
                 ),
-                // The census is the whole diagnosis. "Nothing connected" means pick a controller
-                // up; "2 controllers" alongside this line means they are connected and OpenVR is
-                // refusing to report their buttons, which is a different and much larger fix.
                 true => tracing::info!(
                     target: "ward::vr",
                     connected = %session.census(),
-                    "no controllers to grab with yet"
+                    "no controllers to carry with yet"
                 ),
             }
 
-            // Said once either way. This runs every frame the panel is up.
             self.saw_controllers = true;
         }
 
-        // Already holding it, or pointing at it and squeezing. Once held, where the ray is stops
-        // mattering: letting go is what ends a grab, not aiming away.
-        let taking = controllers.iter().find_map(|hand| {
-            if !hand.grip {
-                return None;
-            }
+        match self.held {
+            // Being carried. Only the hand that took it matters: a second hand pressing does not
+            // take it over, and that hand letting go puts it down wherever the other one is.
+            Some(grab) => {
+                let Some(hand) = hands.iter().find(|hand| hand.device == grab.device) else {
+                    return;
+                };
 
-            match self.held {
-                Some(grab) => Some((hand, grab)),
-                None => layer.hit_by(hand.at, hand.forward).map(|hit| {
-                    (
-                        hand,
-                        Grab {
-                            reach: hit.distance,
-                        },
-                    )
-                }),
-            }
-        });
+                // Not held any more. Fast enough at the moment of release and it was thrown away
+                // rather than put down.
+                if !self.pressed {
+                    self.held = None;
 
-        match (taking, self.held.is_some()) {
-            // Taking hold. The distance is remembered so the panel stays where it is rather than
-            // sliding up the ray the instant it is caught.
-            (Some((_, grab)), false) => {
-                tracing::info!(target: "ward::vr", reach = grab.reach, "panel taken hold of");
-                self.held = Some(grab);
-            }
-            // Carrying it, out along the ray. Turned to face the Commander rather than rolled with
-            // the wrist, because a panel that rolls is one you cannot put down level.
-            (Some((hand, grab)), true) => {
-                let at = hand.at + hand.forward * grab.reach;
+                    if hand.speed.length() > FLICK {
+                        tracing::info!(target: "ward::vr", "panel flicked away");
+                        self.change(Mode::Gone);
+                    }
+                    return;
+                }
+
+                // The offset frozen at the grab, reapplied to where the hand is now. That is what
+                // makes it feel attached rather than dragged: it keeps the distance and the
+                // bearing it had when it was caught.
+                let carried = hand.aim * grab.offset;
+                let at = glam::Vec3::from(carried.translation);
+
                 self.placed = Some(glam::Affine3A::from_rotation_translation(
                     facing(session, at),
                     at,
                 ));
 
-                // Grabbing the mini panel is how it becomes the big one. It is the same surface
-                // being pulled open, which is why this is a mode and not a second overlay.
-                if self.mode == Mode::Mini {
+                // Carrying the small panel is how it becomes the big one. The same surface being
+                // pulled open, which is why this is a mode and not a second overlay.
+                if self.mode == Mode::Mini && hand.speed.length() > PULL {
                     self.change(Mode::Big);
                 }
             }
-            // Let go. Fast enough and it was thrown away rather than put down.
-            (None, true) => {
-                self.held = None;
-
-                let thrown = controllers.iter().any(|hand| hand.speed.length() > FLICK);
-
-                if thrown {
-                    tracing::info!(target: "ward::vr", "panel flicked away");
-                    self.change(Mode::Gone);
+            // Not carried. A trigger held on the grab strip picks it up.
+            None => {
+                if !self.pressed || !self.on_strip {
+                    return;
                 }
+
+                let Some(hand) = nearest_pointing(&hands, layer) else {
+                    return;
+                };
+
+                self.held = Some(Grab {
+                    device: hand.device,
+                    offset: hand.aim.inverse() * placed,
+                });
+
+                tracing::info!(target: "ward::vr", device = hand.device, "panel taken hold of");
             }
-            (None, false) => {}
         }
     }
 

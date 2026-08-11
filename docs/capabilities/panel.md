@@ -67,9 +67,16 @@ alone, which matters because the other two routes each need something — the
 spoken one needs Ward to be hearing you, and the grab needs a controller in
 your hand.
 
-**Use your hands.** Point at the panel and squeeze the **grip** to take hold of
-it — not the trigger, which is the click. One squeeze cannot mean both, and
-pressing buttons on a panel is the more common of the two.
+**Use your hands.** Point at the strip along the top of the panel and hold the
+**trigger**. The panel comes with your hand until you let go, keeping the
+distance and bearing it had when you caught it. Let go while still moving and you
+have thrown it away, and it is gone.
+
+The strip is there because everywhere else on the panel is a control, and a press
+on a control is a click. It is the one part of the surface that does nothing, so
+it is the one part that can mean "pick this up".
+
+Dragging the small panel open turns it into the big one.
 It then moves with your hand, keeping the distance it had when you caught it, so
 you can put it where you want rather than where Ward guessed. Grabbing the small
 panel pulls it open into the big one. Let go with your hand still moving and you

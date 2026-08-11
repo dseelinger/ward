@@ -18,6 +18,26 @@
 //! only translation is the Y axis, which OpenVR counts from the bottom and every toolkit counts
 //! from the top.
 //!
+//! # The trigger is the only button there is
+//!
+//! An overlay application is told about the trigger, because SteamVR delivers it as that mouse
+//! press. It is told about **no other button** unless it registers an input manifest, and the
+//! interface that used to answer without one - `GetControllerState` - now returns false for
+//! controllers that are connected and tracking, silently.
+//!
+//! So the grip is not available, and a panel carried by the grip is a panel that can never be
+//! picked up. Registering a manifest to get it back was tried, accepted by SteamVR, and still bound
+//! nothing. What works is the button that was already arriving.
+//!
+//! Two things follow, and neither is obvious:
+//!
+//! - **The press does not say which hand.** `trackedDeviceIndex` on an overlay mouse event is the
+//!   invalid index, so the event says where on the panel and never who. The hand is found by
+//!   casting each controller's ray at the overlay, which only has to tell one hand from the other.
+//! - **A controller's pose is not where it points.** OpenVR reports the grip, in the handle. The
+//!   tip differs by a large angle on some controllers, so the offset has to come out of the render
+//!   model or every ray lands somewhere the Commander is not aiming.
+//!
 //! # Once, and only once
 //!
 //! `VR_Init` is called once and repeated calls leak. Nothing in OpenVR refuses a second call, so
@@ -49,10 +69,6 @@ pub enum Error {
     MissingInterface(&'static str),
     /// An overlay call failed.
     Overlay(&'static str, sys::EVROverlayError),
-    /// The action manifest is not beside the executable, so there is nothing to register.
-    NoManifest,
-    /// An input call failed.
-    Input(&'static str, sys::EVRInputError),
 }
 
 impl fmt::Display for Error {
@@ -78,11 +94,6 @@ impl fmt::Display for Error {
                  runtime may disagree about versions."
             ),
             Self::Overlay(what, code) => write!(f, "{what} failed with overlay error {code}"),
-            Self::NoManifest => write!(
-                f,
-                "no {MANIFEST} beside the executable. Without it SteamVR will not report the                  controllers, because the interface that does not need one is no longer answered."
-            ),
-            Self::Input(what, code) => write!(f, "{what} failed with input error {code}"),
         }
     }
 }
@@ -93,29 +104,9 @@ impl std::error::Error for Error {}
 pub struct Vr {
     overlay: &'static sys::VR_IVROverlay_FnTable,
     system: &'static sys::VR_IVRSystem_FnTable,
-    /// How the controllers are read. Absent if the manifest could not be registered, which costs
-    /// the gesture and nothing else.
-    input: Option<Input>,
-}
-
-/// Everything needed to ask what the Commander's hands are doing.
-///
-/// **The legacy API is not used, because SteamVR no longer answers it.** `GetControllerState`
-/// returned false for two controllers that were connected and tracking, which is what SteamVR does
-/// to an application that has not declared its input through a manifest. Nothing about that is an
-/// error anybody can see: the buttons simply never arrive.
-///
-/// So Ward ships an action manifest naming what it wants — one action set, a grab and a hand pose
-/// — and asks for those instead. The side benefit is the one that matters to a Commander: the grip
-/// becomes rebindable in SteamVR's own per-application binding interface, so the choice is theirs
-/// rather than one made here.
-struct Input {
-    table: &'static sys::VR_IVRInput_FnTable,
-    set: sys::VRActionSetHandle_t,
-    grab: sys::VRActionHandle_t,
-    pose: sys::VRActionHandle_t,
-    /// One per hand, so each can be asked about separately.
-    hands: [sys::VRInputValueHandle_t; 2],
+    /// Only for asking where a controller actually points. Absent if the runtime will not hand it
+    /// over, which leaves the ray coming out of the handle rather than the tip.
+    models: Option<&'static sys::VR_IVRRenderModels_FnTable>,
 }
 
 /// Something that happened on an overlay, already in the toolkit's terms.
@@ -138,24 +129,29 @@ pub enum Event {
     DoneTyping,
 }
 
-/// Where a controller is, and what is held down on it.
+/// One controller, as the panel needs to see it.
+///
+/// **No buttons.** Nothing here says whether anything is pressed, and that is the shape of the
+/// whole thing: an overlay application is told about the trigger through ordinary mouse events on
+/// its overlay, and about no other button at all unless it ships an input manifest. The trigger is
+/// therefore the only button a panel can have, so the trigger is what picks it up.
 #[derive(Clone, Copy, Debug)]
 pub struct Controller {
-    /// Where it is in the room, in metres.
-    pub at: glam::Vec3,
-    /// Which way it is pointing. Negative Z, the way every tracked device in OpenVR points.
+    /// Which tracked device this is.
     ///
-    /// This is what a grab is aimed with. Reaching out and touching a panel only works for one
-    /// close enough to touch, and a panel a Commander can read is a metre and a half away — well
-    /// past where a seated arm ends.
-    pub forward: glam::Vec3,
+    /// Carried because "the hand holding the panel" has to be sayable across frames. Without it
+    /// the code can only say "the first one in the list", which is device order and means
+    /// something else entirely.
+    pub device: u32,
+    /// Where it points from, which is not where it is: OpenVR reports the grip, in the handle,
+    /// and this is the tip the laser comes out of. See [`Vr::grip_to_aim`].
+    ///
+    /// The grip pose itself is deliberately absent. Everything here is measured against the ray
+    /// the Commander can see, so carrying a panel by the handle it is not pointing with would put
+    /// it somewhere they did not aim.
+    pub aim: Affine3A,
     /// How fast it is moving, in metres per second. What a flick is made of.
     pub speed: glam::Vec3,
-    /// Whether the grip is squeezed, which is the only button read here.
-    ///
-    /// The trigger is deliberately absent. SteamVR already delivers it as an overlay mouse click,
-    /// and reading it a second time here would be one press understood as two things.
-    pub grip: bool,
 }
 
 /// Where a ray met an overlay.
@@ -217,25 +213,13 @@ impl Vr {
             }
         };
 
-        // Failing here costs the gesture and nothing else, so it is a warning rather than a
-        // refusal to start. A Commander with no controllers in hand should not be told the headset
-        // is unavailable because a JSON file could not be found.
-        let input = match Input::start() {
-            Ok(input) => Some(input),
-            Err(e) => {
-                tracing::warn!(
-                    target: "ward::vr",
-                    error = %e,
-                    "the panel cannot be grabbed, and everything else works"
-                );
-                None
-            }
-        };
+        let models =
+            unsafe { interface::<sys::VR_IVRRenderModels_FnTable>(sys::IVRRenderModels_Version) };
 
         Ok(Self {
             overlay,
             system,
-            input,
+            models,
         })
     }
 
@@ -288,20 +272,137 @@ impl Vr {
 
     /// Every controller SteamVR currently knows about.
     ///
-    /// Returned as a list rather than as a left and a right, because which hand a controller is in
-    /// is a question this does not need to ask: a grab is a grab from either.
+    /// Returned as a list rather than as a left and a right, because which hand a controller is
+    /// in is a question this does not need to ask: a grab is a grab from either.
     #[must_use]
     pub fn controllers(&self) -> Vec<Controller> {
-        let Some(input) = self.input.as_ref() else {
-            return Vec::new();
+        let mut found = Vec::new();
+
+        let Some(class_of) = self.system.GetTrackedDeviceClass else {
+            return found;
         };
 
-        input.update();
-        input
-            .hands
-            .iter()
-            .filter_map(|hand| input.hand(*hand))
-            .collect()
+        for (index, pose) in self.poses_raw().iter().enumerate() {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the array is 64 long and indexed by a u32 everywhere in OpenVR"
+            )]
+            let index = index as u32;
+
+            if !pose.bPoseIsValid
+                || !pose.bDeviceIsConnected
+                || unsafe { class_of(index) }
+                    != sys::ETrackedDeviceClass_TrackedDeviceClass_Controller
+            {
+                continue;
+            }
+
+            let placed = from_openvr(pose.mDeviceToAbsoluteTracking);
+            let velocity = pose.vVelocity.v;
+
+            found.push(Controller {
+                device: index,
+                aim: placed * self.grip_to_aim(index),
+                speed: glam::Vec3::new(velocity[0], velocity[1], velocity[2]),
+            });
+        }
+
+        found
+    }
+
+    /// The transform from a controller's reported pose to where it actually points.
+    ///
+    /// OpenVR reports the **grip** pose, which sits in the handle and runs roughly along it. What
+    /// a Commander means by pointing is the **tip**, and on some controllers those differ by a
+    /// large angle - so taking negative Z of the raw pose puts a ray well away from the laser they
+    /// can see coming out of their own hand.
+    ///
+    /// The offset comes out of the render model rather than a constant, because it differs for
+    /// every controller. Identity when it cannot be had, which leaves the ray wrong in the obvious
+    /// way rather than failing.
+    fn grip_to_aim(&self, device: u32) -> Affine3A {
+        let Some(models) = self.models else {
+            return Affine3A::IDENTITY;
+        };
+        let (Some(state_of), Some(has_component)) =
+            (models.GetComponentState, models.RenderModelHasComponent)
+        else {
+            return Affine3A::IDENTITY;
+        };
+        let Some(model) = self.property(
+            device,
+            sys::ETrackedDeviceProperty_Prop_RenderModelName_String,
+        ) else {
+            return Affine3A::IDENTITY;
+        };
+        let Ok(model) = CString::new(model) else {
+            return Affine3A::IDENTITY;
+        };
+
+        // The tip first, because that is the component SteamVR's own laser comes out of, and that
+        // laser is the Commander's reference for where they are pointing.
+        for component in [
+            sys::k_pch_Controller_Component_Tip.as_slice(),
+            sys::k_pch_Controller_Component_OpenXR_Aim.as_slice(),
+        ] {
+            let Ok(component) = CStr::from_bytes_with_nul(component) else {
+                continue;
+            };
+
+            if !unsafe { has_component(model.as_ptr().cast_mut(), component.as_ptr().cast_mut()) } {
+                continue;
+            }
+
+            let mut buttons = sys::VRControllerState_t::default();
+            let mut mode = sys::RenderModel_ControllerMode_State_t::default();
+            let mut state = sys::RenderModel_ComponentState_t::default();
+
+            let got = unsafe {
+                state_of(
+                    model.as_ptr().cast_mut(),
+                    component.as_ptr().cast_mut(),
+                    &raw mut buttons,
+                    &raw mut mode,
+                    &raw mut state,
+                )
+            };
+
+            if got {
+                return from_openvr(state.mTrackingToComponentLocal);
+            }
+        }
+
+        Affine3A::IDENTITY
+    }
+
+    /// One of a device's string properties, if it has one.
+    fn property(&self, device: u32, property: sys::ETrackedDeviceProperty) -> Option<String> {
+        let read = self.system.GetStringTrackedDeviceProperty?;
+
+        let mut buffer = [0i8; 256];
+        let mut error = sys::ETrackedPropertyError_TrackedProp_Success;
+
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the buffer is 256 bytes, which a u32 counts easily"
+        )]
+        let size = buffer.len() as u32;
+
+        let written = unsafe { read(device, property, buffer.as_mut_ptr(), size, &raw mut error) };
+
+        if error != sys::ETrackedPropertyError_TrackedProp_Success || written == 0 {
+            return None;
+        }
+
+        // SAFETY: OpenVR writes a terminated string into the buffer, which outlives this read.
+        let text = unsafe { CStr::from_ptr(buffer.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+
+        match text.is_empty() {
+            true => None,
+            false => Some(text),
+        }
     }
 
     /// What SteamVR says is connected, counted by kind.
@@ -317,9 +418,12 @@ impl Vr {
         };
 
         let mut counts = [0usize; 5];
-        // A connected controller that is not tracking is one asleep on a desk, which is worth
-        // telling apart from one that is awake and simply not reporting a grab.
+        // Why each controller was passed over, which is the part that names the fix. A connected
+        // controller that is not tracking is one asleep on a desk. A tracking controller whose
+        // buttons cannot be read is SteamVR declining the legacy input API, and no amount of
+        // squeezing will change that.
         let mut untracked = 0usize;
+        let mut unreadable = 0usize;
 
         for (index, pose) in self.poses_raw().iter().enumerate() {
             if !pose.bDeviceIsConnected {
@@ -345,6 +449,23 @@ impl Vr {
 
             if !pose.bPoseIsValid {
                 untracked += 1;
+                continue;
+            }
+
+            let Some(state_of) = self.system.GetControllerState else {
+                unreadable += 1;
+                continue;
+            };
+
+            let mut state = sys::VRControllerState_t::default();
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the struct is far smaller than a u32 can count"
+            )]
+            let size = std::mem::size_of::<sys::VRControllerState_t>() as u32;
+
+            if !unsafe { state_of(index, &raw mut state, size) } {
+                unreadable += 1;
             }
         }
 
@@ -367,10 +488,8 @@ impl Vr {
             seen.push(format!("{untracked} not tracking"));
         }
 
-        // Whether the manifest was accepted at all, which is now the difference between a grab
-        // that can work and one that cannot.
-        if self.input.is_none() {
-            seen.push("no input manifest, so no grabbing".to_string());
+        if unreadable > 0 {
+            seen.push(format!("{unreadable} refusing to report buttons"));
         }
 
         match seen.is_empty() {
@@ -916,180 +1035,6 @@ pub struct VulkanImage {
     pub format: u32,
 }
 
-impl Input {
-    /// Registers Ward's manifest and looks up everything in it.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the interface is missing, if the manifest is not beside the executable, or if
-    /// SteamVR will not accept it. Each of those is the same outcome — no gestures — and each is
-    /// worth telling apart in a log.
-    fn start() -> Result<Self, Error> {
-        let table = unsafe { interface::<sys::VR_IVRInput_FnTable>(sys::IVRInput_Version) }
-            .ok_or(Error::MissingInterface("input interface"))?;
-
-        // Beside the executable, like everything else Ward ships. An absolute path, because
-        // SteamVR resolves this against its own working directory rather than ours.
-        let manifest = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join(MANIFEST)))
-            .ok_or(Error::NoManifest)?;
-
-        if !manifest.is_file() {
-            return Err(Error::NoManifest);
-        }
-
-        let path =
-            CString::new(manifest.to_string_lossy().as_ref()).map_err(|_| Error::NoManifest)?;
-
-        let register = table
-            .SetActionManifestPath
-            .ok_or(Error::MissingInterface("SetActionManifestPath"))?;
-        check_input("SetActionManifestPath", unsafe {
-            register(path.as_ptr().cast_mut())
-        })?;
-
-        let set = Self::action_set(table, "/actions/panel")?;
-        let grab = Self::action(table, "/actions/panel/in/grab")?;
-        let pose = Self::action(table, "/actions/panel/in/hand")?;
-        let hands = [
-            Self::source(table, "/user/hand/left")?,
-            Self::source(table, "/user/hand/right")?,
-        ];
-
-        tracing::info!(target: "ward::vr", manifest = %manifest.display(), "input manifest registered");
-
-        Ok(Self {
-            table,
-            set,
-            grab,
-            pose,
-            hands,
-        })
-    }
-
-    fn action_set(
-        table: &'static sys::VR_IVRInput_FnTable,
-        name: &str,
-    ) -> Result<sys::VRActionSetHandle_t, Error> {
-        let name = CString::new(name).map_err(|_| Error::NoManifest)?;
-        let mut handle = 0;
-        let get = table
-            .GetActionSetHandle
-            .ok_or(Error::MissingInterface("GetActionSetHandle"))?;
-
-        check_input("GetActionSetHandle", unsafe {
-            get(name.as_ptr().cast_mut(), &raw mut handle)
-        })?;
-        Ok(handle)
-    }
-
-    fn action(
-        table: &'static sys::VR_IVRInput_FnTable,
-        name: &str,
-    ) -> Result<sys::VRActionHandle_t, Error> {
-        let name = CString::new(name).map_err(|_| Error::NoManifest)?;
-        let mut handle = 0;
-        let get = table
-            .GetActionHandle
-            .ok_or(Error::MissingInterface("GetActionHandle"))?;
-
-        check_input("GetActionHandle", unsafe {
-            get(name.as_ptr().cast_mut(), &raw mut handle)
-        })?;
-        Ok(handle)
-    }
-
-    fn source(
-        table: &'static sys::VR_IVRInput_FnTable,
-        path: &str,
-    ) -> Result<sys::VRInputValueHandle_t, Error> {
-        let path = CString::new(path).map_err(|_| Error::NoManifest)?;
-        let mut handle = 0;
-        let get = table
-            .GetInputSourceHandle
-            .ok_or(Error::MissingInterface("GetInputSourceHandle"))?;
-
-        check_input("GetInputSourceHandle", unsafe {
-            get(path.as_ptr().cast_mut(), &raw mut handle)
-        })?;
-        Ok(handle)
-    }
-
-    /// Brings the action set up to date, which has to happen before anything is asked of it.
-    ///
-    /// Every frame, and quietly. A failure here is a frame with no gesture in it, and saying so
-    /// sixty times a second would bury everything else in the log.
-    fn update(&self) {
-        let Some(update) = self.table.UpdateActionState else {
-            return;
-        };
-
-        let mut active = sys::VRActiveActionSet_t {
-            ulActionSet: self.set,
-            ulRestrictedToDevice: sys::k_ulInvalidInputValueHandle,
-            ulSecondaryActionSet: 0,
-            unPadding: 0,
-            nPriority: 0,
-        };
-
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the struct is far smaller than a u32 can count"
-        )]
-        let size = std::mem::size_of::<sys::VRActiveActionSet_t>() as u32;
-
-        unsafe { update(&raw mut active, size, 1) };
-    }
-
-    /// What one hand is doing, or nothing if it is not being tracked.
-    fn hand(&self, which: sys::VRInputValueHandle_t) -> Option<Controller> {
-        let poses = self.table.GetPoseActionDataRelativeToNow?;
-        let digital = self.table.GetDigitalActionData?;
-
-        let mut pose = sys::InputPoseActionData_t::default();
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the struct is far smaller than a u32 can count"
-        )]
-        let pose_size = std::mem::size_of::<sys::InputPoseActionData_t>() as u32;
-
-        // No prediction, the same as the pose path this replaced. A panel is furniture rather than
-        // something being aimed, and predicting where a hand will be adds jitter to the decision
-        // about whether it grabbed anything.
-        let got = unsafe { poses(self.pose, STANDING, 0.0, &raw mut pose, pose_size, which) };
-
-        if got != sys::EVRInputError_VRInputError_None || !pose.bActive || !pose.pose.bPoseIsValid {
-            return None;
-        }
-
-        let mut grabbing = sys::InputDigitalActionData_t::default();
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the struct is far smaller than a u32 can count"
-        )]
-        let digital_size = std::mem::size_of::<sys::InputDigitalActionData_t>() as u32;
-
-        let held = unsafe { digital(self.grab, &raw mut grabbing, digital_size, which) };
-
-        let placed = from_openvr(pose.pose.mDeviceToAbsoluteTracking);
-        let velocity = pose.pose.vVelocity.v;
-
-        Some(Controller {
-            at: placed.translation.into(),
-            // Negative Z is forward, the way every tracked device in OpenVR points.
-            forward: -glam::Vec3::from(placed.matrix3.z_axis),
-            speed: glam::Vec3::new(velocity[0], velocity[1], velocity[2]),
-            // An action that is not bound on this controller is not held. `bActive` says whether
-            // the binding exists at all, and treating an unbound action as pressed would grab the
-            // panel the moment a controller woke up.
-            grip: held == sys::EVRInputError_VRInputError_None
-                && grabbing.bActive
-                && grabbing.bState,
-        })
-    }
-}
-
 /// Fetches a flat-API function table.
 ///
 /// The flat API wants a `FnTable:` prefix on the version string. Without it OpenVR hands back a
@@ -1169,21 +1114,6 @@ const STANDING: sys::ETrackingUniverseOrigin =
 fn shutdown() {
     unsafe { sys::VR_ShutdownInternal() };
     RUNNING.store(false, Ordering::SeqCst);
-}
-
-/// Where the action manifest lives, relative to the executable.
-///
-/// Shipped rather than generated. It names the actions and carries a default binding for each
-/// kind of controller, and SteamVR reads it to build the binding interface a Commander uses to
-/// change them.
-const MANIFEST: &str = "input/ward_actions.json";
-
-fn check_input(what: &'static str, code: sys::EVRInputError) -> Result<(), Error> {
-    if code == sys::EVRInputError_VRInputError_None {
-        Ok(())
-    } else {
-        Err(Error::Input(what, code))
-    }
 }
 
 fn check(what: &'static str, code: sys::EVROverlayError) -> Result<(), Error> {

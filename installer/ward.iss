@@ -74,17 +74,6 @@ Source: "..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 ; and the error names nothing that suggests why.
 Source: "..\target\release\openvr_api.dll"; DestDir: "{app}"; Flags: ignoreversion
 
-; What Ward's controller bindings are, which SteamVR reads rather than Ward. The
-; interface that needed no manifest is no longer answered, so without these the
-; panel cannot be grabbed at all - and SteamVR's own binding interface has no
-; entry for Ward, which is where a Commander would go to change the grip to
-; something else.
-;
-; Beside the executable because that is where Ward looks, and Ward looks there
-; because SteamVR resolves the path it is handed against its own working
-; directory rather than ours.
-Source: "..\target\release\input\*"; DestDir: "{app}\input"; Flags: ignoreversion
-
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\NOTICE.md"; DestDir: "{app}"; Flags: ignoreversion

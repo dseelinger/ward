@@ -337,6 +337,12 @@ struct Panel {
     /// Whether SteamVR's keyboard is up, so it is asked for once rather than every frame a text
     /// box has focus.
     typing: bool,
+    /// Whether the Commander closed the drawn keyboard while a box still had focus.
+    ///
+    /// Held until focus moves, because otherwise the frame after they dismiss it sees the same
+    /// focused box and asks for it straight back - so it could not be dismissed at all. There is a
+    /// real keyboard now, so closing the drawn one is an ordinary thing to want.
+    keyboard_dismissed: bool,
     /// What the last resize asked for, held until the texture behind it has actually been handed
     /// over, so the answer is read when there is something to read.
     asked_for: Option<String>,
@@ -608,7 +614,13 @@ impl Panel {
 
                     art.typed(&text);
                 }
-                crate::vr::Event::DoneTyping => self.typing = false,
+                crate::vr::Event::DoneTyping => {
+                    // Closed, and not to be reopened until focus actually moves. Without this the
+                    // next frame sees a text box still focused, asks for the keyboard again, and
+                    // the Commander cannot dismiss it at all while a box has focus.
+                    self.typing = false;
+                    self.keyboard_dismissed = true;
+                }
                 crate::vr::Event::Left => {
                     art.point_at(None);
                     // The button is not released here. egui keeps it down on purpose when the
@@ -628,7 +640,7 @@ impl Panel {
         // does not know whether a headset exists and must not have an opinion about one.
         if view.panel_asks != self.local.answered_asks {
             self.local.answered_asks = view.panel_asks;
-            self.change(view.panel_wanted);
+            self.change(view.panel_wanted, "asked out loud");
         }
 
         // Rebuilt only when the setting changes, because resolving a key name goes through the
@@ -656,7 +668,7 @@ impl Panel {
         // The press, not the hold. A key read as held would toggle the panel sixty times a second
         // for as long as a finger stayed on it.
         if down && !self.summon_down {
-            self.change(self.mode.cycled());
+            self.change(self.mode.cycled(), "key");
         }
         self.summon_down = down;
 
@@ -722,7 +734,7 @@ impl Panel {
 
                     if hand.speed.length() > FLICK {
                         tracing::info!(target: "ward::vr", "panel flicked away");
-                        self.change(Mode::Gone);
+                        self.change(Mode::Gone, "flicked away");
                     }
                     return;
                 }
@@ -751,7 +763,7 @@ impl Panel {
                     let now = glam::Vec3::from(carried.translation).distance(head);
 
                     if grab.reach - now > PULL {
-                        self.change(Mode::Big);
+                        self.change(Mode::Big, "pulled open");
                     }
                 }
             }
@@ -790,7 +802,13 @@ impl Panel {
     fn keyboard(&mut self, layer: &crate::vr::Overlay<'_>, art: &crate::render::Renderer) {
         let wanted = art.wants_typing();
 
-        if wanted && !self.typing {
+        // Focus going away is what re-arms it. Dismissing the keyboard means "not now" rather than
+        // "never again", and the next box pointed at should bring it back.
+        if !wanted {
+            self.keyboard_dismissed = false;
+        }
+
+        if wanted && !self.typing && !self.keyboard_dismissed {
             match layer.show_keyboard("Ward", "") {
                 Ok(()) => {
                     tracing::info!(target: "ward::vr", "keyboard up");
@@ -815,7 +833,7 @@ impl Panel {
     /// The guard is what keeps one gesture from being read as several. A grab is held across many
     /// frames and a flick is a hand that stays fast for a tenth of a second, so acting on every
     /// frame that matches would open and close the panel repeatedly from one movement.
-    fn change(&mut self, to: Mode) {
+    fn change(&mut self, to: Mode, why: &'static str) {
         if self.mode == to {
             return;
         }
@@ -827,7 +845,10 @@ impl Panel {
             self.held = None;
         }
 
-        tracing::info!(target: "ward::vr", from = ?self.mode, to = ?to, "panel");
+        // Why, because two of these are indistinguishable without it: a panel pulled open and a
+        // panel opened by the key both arrive here as Mini to Big, and reading a log full of them
+        // says nothing about whether the gesture works.
+        tracing::info!(target: "ward::vr", from = ?self.mode, to = ?to, %why, "panel");
         self.mode = to;
         self.settled = Some(Instant::now());
     }

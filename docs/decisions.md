@@ -269,13 +269,14 @@ falls back on what the model happens to remember. The rules that hold this are
 static prompt material and must never be strippable by a budget or a speed
 setting.
 
-> accepted — nothing checks it, and this is the one on the list that most
-> deserves a check. The failure it prevents has been seen: fabricated station
-> stock, a fabricated pledge and a fabricated discount, all delivered with
-> total confidence, after guardrails were dropped alongside tools to save
-> tokens. Revisit when
-> [#80](https://github.com/dseelinger/ward/issues/80) is built, because that is
-> the issue that would drop them again.
+> open — half held. The rules are in the static system prompt and one test
+> asserts the words are still in it, which catches somebody editing them out.
+> Nothing asserts they reach the request, so a change to how the prompt is
+> assembled would pass that test while shipping turns with no guardrails at
+> all — and nothing stops a future budget setting stripping them, which is
+> exactly how this failed before: fabricated station stock, a fabricated pledge
+> and a fabricated discount, all spoken as fact.
+> [#128](https://github.com/dseelinger/ward/issues/128)
 
 ## D28 — The naming allowlist covers integrations only
 

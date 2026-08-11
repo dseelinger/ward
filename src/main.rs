@@ -109,7 +109,11 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(size)
-            .with_min_inner_size([520.0, 400.0])
+            // Two surfaces side by side need room for both. Below this the
+            // checklist takes so much of the width that the conversation is a
+            // strip, which is a window that is technically usable and actually
+            // not.
+            .with_min_inner_size([760.0, 480.0])
             .with_title("Ward"),
         ..Default::default()
     };
@@ -132,6 +136,24 @@ fn main() -> eframe::Result<()> {
                 as Box<dyn eframe::App>)
         }),
     )
+}
+
+/// Converts a window size from what the toolkit reports to what the window
+/// system is asked for.
+///
+/// These are two different units and they look identical, which is what makes
+/// this worth a function and a name. The toolkit lays out in points, and a
+/// point is smaller than a pixel by both the display's own scaling **and**
+/// Ward's text size. The window system knows only about the display's scaling.
+///
+/// Remembering the toolkit's number and handing it back to the window system
+/// shrinks the window by the text size on every close. It is invisible in one
+/// run and unmistakable after four: at a text size of 1.35 the window is down
+/// to a quarter of its area, and by then it is sitting on its own minimum with
+/// the checklist filling it. That is not a window somebody chose; it is a
+/// window that decayed.
+fn as_the_window_system_counts_it(points: egui::Vec2, zoom: f32) -> egui::Vec2 {
+    points * zoom
 }
 
 enum Screen {
@@ -726,6 +748,11 @@ impl Ward {
             .filter_map(|c| c.display())
             .collect();
 
+        // What the Commander asked for, decided while drawing and carried out
+        // after. Running a tool mid-draw would mean the rest of the frame
+        // renders a list that has already changed underneath it.
+        let mut edit: Option<(&'static str, String)> = None;
+
         for display in displays {
             let title = display.title().unwrap_or_default().to_string();
 
@@ -748,20 +775,15 @@ impl Ward {
                     let mut done = row.done;
 
                     // Only ever forward. Unticking is a different question from
-                    // the one this issue answers, and guessing at it would put
-                    // a control on screen with no spoken equivalent.
-                    if ui.add_enabled(!done, egui::Checkbox::new(&mut done, "")).clicked() {
-                        let answer = self
-                            .registry
-                            .run("checklist_complete", &json!({"item": row.text}));
-                        tracing::info!(target: "ward::checklist", from = "panel", %answer, "completed");
-                    }
-
-                    if ui.small_button("✕").clicked() {
-                        let answer = self
-                            .registry
-                            .run("checklist_remove", &json!({"item": row.text}));
-                        tracing::info!(target: "ward::checklist", from = "panel", %answer, "removed");
+                    // the one this issue answers, and putting a control on
+                    // screen with no spoken equivalent is how the two surfaces
+                    // start disagreeing about what can be done.
+                    if ui
+                        .add_enabled(!done, egui::Checkbox::new(&mut done, ""))
+                        .on_hover_text("Mark as done")
+                        .clicked()
+                    {
+                        edit = Some(("checklist_complete", row.text.clone()));
                     }
 
                     let label = match row.done {
@@ -769,28 +791,41 @@ impl Ward {
                         false => egui::RichText::new(&row.text),
                     };
                     ui.label(label);
+
+                    // Pushed to the far edge, and a word rather than a symbol.
+                    // Next to the tick box it was a second small square, and a
+                    // small square beside a tick box reads as another tick box
+                    // - so the control that destroys something looked like the
+                    // control that completes it.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button("Remove")
+                            .on_hover_text("Take this off the list entirely")
+                            .clicked()
+                        {
+                            edit = Some(("checklist_remove", row.text.clone()));
+                        }
+                    });
                 });
             }
 
             ui.add_space(8.0);
 
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut self.adding)
-                    .hint_text("Add something")
-                    .desired_width(f32::INFINITY),
-            );
+            let field =
+                ui.add(egui::TextEdit::singleline(&mut self.adding).hint_text("Add something"));
 
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
             if entered && !self.adding.trim().is_empty() {
-                let answer = self
-                    .registry
-                    .run("checklist_add", &json!({"item": self.adding.trim()}));
-                tracing::info!(target: "ward::checklist", from = "panel", %answer, "added");
-
+                edit = Some(("checklist_add", self.adding.trim().to_string()));
                 self.adding.clear();
                 field.request_focus();
             }
+        }
+
+        if let Some((tool, item)) = edit {
+            let answer = self.registry.run(tool, &json!({ "item": item }));
+            tracing::info!(target: "ward::checklist", from = "panel", tool, %answer, "edited");
         }
     }
 
@@ -877,8 +912,11 @@ impl eframe::App for Ward {
         // remembered, without having to ask the window system after the window
         // has gone. The viewport rect is the window itself, not the area left
         // inside it after decoration.
+        //
+        // Converted on the way out, because the two ends of this count in
+        // different units. See [`as_the_window_system_counts_it`].
         if let Some(rect) = ui.ctx().input(|i| i.viewport().inner_rect) {
-            self.window = rect.size();
+            self.window = as_the_window_system_counts_it(rect.size(), ui.ctx().zoom_factor());
         }
 
         self.pump();
@@ -930,7 +968,11 @@ impl eframe::App for Ward {
         if !need_key {
             egui::Panel::right("standing")
                 .resizable(true)
-                .default_size(280.0)
+                .default_size(300.0)
+                // Bounded, because the panel sizes itself around what is in it
+                // and a long checklist item would otherwise push it as wide as
+                // the sentence, leaving the conversation a strip down the side.
+                .size_range(220.0..=460.0)
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
@@ -955,5 +997,51 @@ impl eframe::App for Ward {
                 });
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_remembered_window_is_the_same_size_when_it_reopens() {
+        // The toolkit reports points and the window system is handed pixels,
+        // and Ward's text size sits between them. Skip the conversion and the
+        // window shrinks by that factor every time it is closed.
+        let asked_for = egui::Vec2::new(1200.0, 800.0);
+        let zoom = 1.35;
+
+        // What the toolkit reports for a window of that size.
+        let reported = asked_for / zoom;
+
+        let remembered = as_the_window_system_counts_it(reported, zoom);
+
+        assert!(
+            (remembered.x - asked_for.x).abs() < 0.01,
+            "reopened at {} after asking for {}",
+            remembered.x,
+            asked_for.x
+        );
+        assert!((remembered.y - asked_for.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn four_closes_do_not_shrink_the_window() {
+        // The way this was noticed: not on the first run, when it is invisible,
+        // but after a few, when the window is on its own minimum and every
+        // surface in it is squeezed.
+        let zoom = 1.35;
+        let mut size = egui::Vec2::new(1200.0, 800.0);
+
+        for _ in 0..4 {
+            size = as_the_window_system_counts_it(size / zoom, zoom);
+        }
+
+        assert!(
+            (size.x - 1200.0).abs() < 0.01,
+            "four closes took it to {}",
+            size.x
+        );
     }
 }

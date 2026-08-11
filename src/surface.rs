@@ -45,7 +45,11 @@ pub use crate::panel::Mode;
 pub const GRAB_STRIP: f32 = 26.0;
 
 /// Draws the strip a press can pick the panel up by.
-fn grab_strip(ui: &mut egui::Ui) {
+///
+/// As wide as whatever it is put in, which is the whole layer on the big panel and the small
+/// panel's own box on the small one. A strip wider than the surface it belongs to is one that can
+/// be grabbed by empty air.
+fn grab_strip(ui: &mut egui::Ui, drawn: &mut Drawn) {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), GRAB_STRIP),
         egui::Sense::hover(),
@@ -67,6 +71,8 @@ fn grab_strip(ui: &mut egui::Ui) {
         let y = middle.y + (step as f32) * 4.0;
         painter.hline((middle.x - 22.0)..=(middle.x + 22.0), y, stroke);
     }
+
+    drawn.strip = Some(rect);
 }
 
 /// Everything a surface holds that the engine does not.
@@ -91,17 +97,31 @@ pub struct Local {
     pub answered_asks: u64,
 }
 
+/// What one pass over the tree produced.
+#[derive(Default)]
+pub struct Drawn {
+    /// What the Commander asked for, for the caller to send on.
+    pub intents: Vec<Intent>,
+    /// Where the grab strip ended up, in points.
+    ///
+    /// Reported rather than assumed, because it is in a different place in each mode: across the
+    /// top of the layer on the big panel, and inside the small panel's own box on the small one.
+    /// A caller working it out from a constant gets one of those wrong, and the symptom is a panel
+    /// that can be picked up by a piece of empty air beside it.
+    pub strip: Option<egui::Rect>,
+}
+
 /// Draws the whole surface and collects what the Commander asked for.
-pub fn show(ui: &mut egui::Ui, view: &View, local: &mut Local, mode: Mode) -> Vec<Intent> {
-    let mut out = Vec::new();
+pub fn show(ui: &mut egui::Ui, view: &View, local: &mut Local, mode: Mode) -> Drawn {
+    let mut drawn = Drawn::default();
 
     match mode {
         Mode::Gone => {}
-        Mode::Mini => mini(ui, view, &mut out),
-        Mode::Big => big(ui, view, local, &mut out),
+        Mode::Mini => mini(ui, view, &mut drawn),
+        Mode::Big => big(ui, view, local, &mut drawn),
     }
 
-    out
+    drawn
 }
 
 /// The mini panel's own backing, for the same reason a caption has one.
@@ -124,11 +144,7 @@ const GLANCE_INK: egui::Color32 = egui::Color32::from_rgb(235, 235, 235);
 /// Drawn into an area rather than the whole layer, so the box is as tall as what is on it. The
 /// alternative is a black slab hanging in the cockpit with four lines in the top of it, which is
 /// the exact mistake the caption layer already made once.
-fn mini(ui: &mut egui::Ui, view: &View, out: &mut Vec<Intent>) {
-    // The same strip as the big panel, in the same place, so picking either one up is the same
-    // movement rather than two things to learn.
-    egui::Panel::top("handle").show(ui, grab_strip);
-
+fn mini(ui: &mut egui::Ui, view: &View, drawn: &mut Drawn) {
     egui::Area::new(egui::Id::new("ward-mini"))
         .anchor(egui::Align2::LEFT_TOP, egui::vec2(0.0, 0.0))
         .show(ui.ctx(), |ui| {
@@ -141,13 +157,19 @@ fn mini(ui: &mut egui::Ui, view: &View, out: &mut Vec<Intent>) {
                     // behind it. The toolkit's own greys are chosen against a known background and
                     // this has none.
                     ui.style_mut().visuals.override_text_color = Some(GLANCE_INK);
-                    glance(ui, view, out);
+
+                    // Inside the box, not above it. As a panel across the top of the layer the
+                    // strip was as wide as the image, and the image is a good deal wider than the
+                    // small panel drawn in the corner of it - so the thing you could pick up
+                    // stretched off into space either side of the thing you could see.
+                    grab_strip(ui, drawn);
+                    glance(ui, view, drawn);
                 });
         });
 }
 
 /// The four lines themselves.
-fn glance(ui: &mut egui::Ui, view: &View, out: &mut Vec<Intent>) {
+fn glance(ui: &mut egui::Ui, view: &View, drawn: &mut Drawn) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Ward").strong());
         ui.weak(state_of(view));
@@ -173,7 +195,7 @@ fn glance(ui: &mut egui::Ui, view: &View, out: &mut Vec<Intent>) {
     // News rather than furniture, so it earns its place on a surface this small.
     if !matches!(view.update, Update::Nothing) {
         ui.add_space(4.0);
-        update_notice(ui, &view.update, out);
+        update_notice(ui, &view.update, drawn);
     }
 }
 
@@ -207,16 +229,16 @@ fn state_of(view: &View) -> &'static str {
 }
 
 /// Everything the window has.
-fn big(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<Intent>) {
+fn big(ui: &mut egui::Ui, view: &View, local: &mut Local, drawn: &mut Drawn) {
     if !view.key_stored {
-        key_screen(ui, view, local, out);
+        key_screen(ui, view, local, drawn);
         return;
     }
 
     // A bar rather than a button tucked somewhere: settings is the second half
     // of what this surface is for, and a Commander whose microphone is wrong
     // needs to reach it without hunting.
-    egui::Panel::top("handle").show(ui, grab_strip);
+    egui::Panel::top("handle").show(ui, |ui| grab_strip(ui, drawn));
 
     egui::Panel::top("where").show(ui, |ui| {
         ui.add_space(4.0);
@@ -249,7 +271,7 @@ fn big(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<Intent>)
             // absent entirely when there is nothing to say. An update notice is
             // news the first time and furniture every time after.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                update_notice(ui, &view.update, out);
+                update_notice(ui, &view.update, drawn);
             });
         });
         ui.add_space(4.0);
@@ -257,7 +279,7 @@ fn big(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<Intent>)
 
     if local.settings_open {
         egui::CentralPanel::default().show(ui, |ui| {
-            local.page.show(ui, view, out);
+            local.page.show(ui, view, &mut drawn.intents);
         });
         return;
     }
@@ -275,14 +297,14 @@ fn big(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<Intent>)
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| checklist(ui, view, local, out));
+                .show(ui, |ui| checklist(ui, view, local, drawn));
         });
 
     egui::CentralPanel::default().show(ui, |ui| {
         // Compose is laid out first so it pins to the bottom; the transcript
         // then takes whatever height is left.
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            compose(ui, view, local, out);
+            compose(ui, view, local, drawn);
             ui.separator();
 
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -298,7 +320,7 @@ fn big(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<Intent>)
 /// until Ward is closing. Both halves matter: fetching and running a binary on
 /// somebody's behalf is a decision they did not make, and an installer window
 /// appearing over the game is one they cannot get to in a headset.
-fn update_notice(ui: &mut egui::Ui, update: &Update, out: &mut Vec<Intent>) {
+fn update_notice(ui: &mut egui::Ui, update: &Update, drawn: &mut Drawn) {
     match update {
         Update::Nothing => {}
         Update::Newer(version) => {
@@ -310,7 +332,7 @@ fn update_notice(ui: &mut egui::Ui, update: &Update, out: &mut Vec<Intent>) {
                 )
                 .clicked()
             {
-                out.push(Intent::Update);
+                drawn.intents.push(Intent::Update);
             }
         }
         Update::Fetching(version) => {
@@ -325,7 +347,7 @@ fn update_notice(ui: &mut egui::Ui, update: &Update, out: &mut Vec<Intent>) {
     }
 }
 
-fn key_screen(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<Intent>) {
+fn key_screen(ui: &mut egui::Ui, view: &View, local: &mut Local, drawn: &mut Drawn) {
     egui::CentralPanel::default().show(ui, |ui| {
         ui.add_space(24.0);
         ui.heading("Ward needs an API key");
@@ -354,13 +376,15 @@ fn key_screen(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<I
         ui.add_space(8.0);
 
         if (ui.button("Save").clicked() || submitted) && !local.key_entry.trim().is_empty() {
-            out.push(Intent::Key(local.key_entry.trim().to_string()));
+            drawn
+                .intents
+                .push(Intent::Key(local.key_entry.trim().to_string()));
             local.key_entry.clear();
         }
     });
 }
 
-fn compose(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<Intent>) {
+fn compose(ui: &mut egui::Ui, view: &View, local: &mut Local, drawn: &mut Drawn) {
     let busy = view.streaming;
 
     ui.horizontal(|ui| {
@@ -385,7 +409,9 @@ fn compose(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<Inte
         let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
         if (send.clicked() || entered) && !local.prompt.trim().is_empty() {
-            out.push(Intent::Ask(std::mem::take(&mut local.prompt)));
+            drawn
+                .intents
+                .push(Intent::Ask(std::mem::take(&mut local.prompt)));
             // Keep focus in the box so a second question does not need the
             // mouse — or, in the headset, a second go at pointing at it.
             field.request_focus();
@@ -399,7 +425,7 @@ fn compose(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<Inte
 /// Every edit here goes through the same tool the model calls, with the same
 /// words. The surface cannot make a change the model could not, and it cannot
 /// make one in a way the checklist's own rules would refuse.
-fn checklist(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<Intent>) {
+fn checklist(ui: &mut egui::Ui, view: &View, local: &mut Local, drawn: &mut Drawn) {
     for display in &view.panels {
         let title = display.title().unwrap_or_default().to_string();
 
@@ -435,7 +461,7 @@ fn checklist(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<In
                 };
 
                 if ui.checkbox(&mut done, "").on_hover_text(hint).clicked() {
-                    out.push(Intent::Tool(
+                    drawn.intents.push(Intent::Tool(
                         match row.done {
                             true => "checklist_reopen",
                             false => "checklist_complete",
@@ -464,7 +490,9 @@ fn checklist(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<In
                         .on_hover_text("Take this off the list entirely")
                         .clicked()
                     {
-                        out.push(Intent::Tool("checklist_remove", row.text.clone()));
+                        drawn
+                            .intents
+                            .push(Intent::Tool("checklist_remove", row.text.clone()));
                     }
 
                     // Turned back around before the text goes in. The outer
@@ -487,7 +515,7 @@ fn checklist(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<In
         let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
         if entered && !local.adding.trim().is_empty() {
-            out.push(Intent::Tool(
+            drawn.intents.push(Intent::Tool(
                 "checklist_add",
                 local.adding.trim().to_string(),
             ));

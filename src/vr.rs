@@ -881,6 +881,31 @@ impl Overlay<'_> {
         format!("{width}x{height} at {metres:.2}m")
     }
 
+    /// Bends the overlay around the Commander.
+    ///
+    /// Zero is flat and one wraps it into a full cylinder; what is useful is a little way in from
+    /// flat, which brings the far edges of a wide panel to the same distance as the middle. On a
+    /// panel a metre across that is the difference between reading the edges and turning your head
+    /// to square up with them.
+    ///
+    /// Captions are deliberately never curved. They are two short lines in the middle of the view,
+    /// where there are no far edges to bring closer, and a curved caption is a caption that has
+    /// been bent for no reason.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the call is refused.
+    pub fn set_curvature(&self, curvature: f32) -> Result<(), Error> {
+        let set = self
+            .table
+            .SetOverlayCurvature
+            .ok_or(Error::MissingInterface("SetOverlayCurvature"))?;
+
+        check("SetOverlayCurvature", unsafe {
+            set(self.handle, curvature.clamp(0.0, 1.0))
+        })
+    }
+
     /// Lets go of the image the compositor is holding.
     ///
     /// Called before the image behind it is thrown away. OpenVR goes on reading a texture it was

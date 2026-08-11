@@ -115,11 +115,13 @@ const PANEL_PIXELS: (u32, u32) = (1900, 1200);
 /// whole point of a surface meant to be read without looking directly at it.
 const MINI_PIXELS: (u32, u32) = (640, 280);
 
-/// How fast a hand has to be moving to pull the small panel open, in metres per second.
+/// How much closer the small panel has to be pulled before it opens, in metres.
 ///
-/// Slower than a flick, because opening it is a deliberate tug rather than a throw, and faster
-/// than the drift of a hand holding something still.
-const PULL: f32 = 0.6;
+/// A quarter of a metre is a deliberate tug toward yourself and not something that happens while
+/// putting the panel somewhere. The first attempt measured speed instead, which fired on any real
+/// movement at all: the small panel could not be carried across the cockpit without becoming the
+/// big one on the way.
+const PULL: f32 = 0.25;
 
 /// How fast a hand has to be moving to count as a flick, in metres per second.
 ///
@@ -300,11 +302,16 @@ struct Panel {
     /// are made when something changes rather than sixty times a second.
     applied_mode: Option<Mode>,
     applied_place: Option<glam::Affine3A>,
+    /// What curvature SteamVR has already been told about, so a setting that has not moved is not
+    /// pushed at it sixty times a second.
+    applied_curve: Option<f32>,
     /// Whether the trigger is down, which the renderer needs as a level and OpenVR reports as two
     /// edges. It is also what carries the panel, because it is the only button that arrives.
     pressed: bool,
     /// Where the ray last was, in the image's own pixels, so a press knows what it landed on.
     pointer: Option<(f32, f32)>,
+    /// Where the grab strip was drawn last frame, in the image's own pixels.
+    strip: Option<egui::Rect>,
     /// Whether the last press landed on the strip along the top rather than on the interface.
     ///
     /// A panel that is entirely widgets has nowhere for a press to mean "pick this up", and asking
@@ -346,9 +353,14 @@ struct Grab {
     /// Where the panel sat in the hand's own space at the moment it was taken.
     ///
     /// Frozen once and multiplied through every frame after. That is what makes a carried panel
-    /// feel attached rather than dragged: it keeps the distance and the bearing it had when it
-    /// was caught, instead of snapping to some fixed place in front of the hand.
+    /// feel attached rather than dragged: it keeps the distance, the bearing and the angle it had
+    /// when it was caught, instead of snapping to some fixed place in front of the hand.
     offset: glam::Affine3A,
+    /// How far the panel was from the Commander's head when it was taken, in metres.
+    ///
+    /// Kept so that pulling the small panel open can be measured against where it started rather
+    /// than against a fixed distance, which would depend on where they happened to put it.
+    reach: f32,
 }
 
 /// The hand whose aim lands on the panel, nearest hit winning.
@@ -396,13 +408,23 @@ impl Panel {
             return Ok(());
         }
 
-        self.settle(layer, art)?;
+        self.settle(layer, art, view.settings.f32("panel curve", 0.0, 0.5))?;
         self.pointed(session, layer, art);
 
         let mode = self.mode;
-        let wants = art.draw_with(|ui| crate::surface::show(ui, &view, &mut self.local, mode));
+        let drawn = art.draw_with(|ui| crate::surface::show(ui, &view, &mut self.local, mode));
 
-        for intent in wants {
+        // Where the strip actually landed this frame, in the image's own pixels. Read from the
+        // tree rather than worked out from a constant, because the two modes put it in different
+        // places and a caller that guesses gets one of them wrong.
+        self.strip = drawn.strip.map(|rect| {
+            egui::Rect::from_min_max(
+                (rect.min.to_vec2() * crate::render::SCALE).to_pos2(),
+                (rect.max.to_vec2() * crate::render::SCALE).to_pos2(),
+            )
+        });
+
+        for intent in drawn.intents {
             engine.tell(intent);
         }
 
@@ -447,6 +469,7 @@ impl Panel {
         &mut self,
         layer: &crate::vr::Overlay<'_>,
         art: &mut crate::render::Renderer,
+        curve: f32,
     ) -> Result<(), crate::vr::Error> {
         if self.applied_mode != Some(self.mode) {
             // Mini is smaller in the room as well as carrying less. Making it narrower without
@@ -469,6 +492,8 @@ impl Panel {
             layer.take_input(pixels.0, pixels.1)?;
             layer.set_width(width)?;
             self.applied_mode = Some(self.mode);
+            // Reapplied with the size, because the two together are what the compositor bends.
+            self.applied_curve = None;
 
             // Asked here and answered after the next texture is submitted. Reading it now says
             // 0x0 every time, because `forget_texture` has just run and the new image does not
@@ -482,6 +507,18 @@ impl Panel {
         {
             layer.place(placed)?;
             self.applied_place = Some(placed);
+        }
+
+        // Read from the picture every frame and pushed only when it moves, so a Commander who
+        // changes it on the settings page sees the panel bend while they are looking at it rather
+        // than the next time Ward starts.
+        let curve = curve.clamp(0.0, 0.5);
+        if self
+            .applied_curve
+            .is_none_or(|had| (had - curve).abs() > f32::EPSILON)
+        {
+            layer.set_curvature(curve)?;
+            self.applied_curve = Some(curve);
         }
 
         Ok(())
@@ -516,9 +553,10 @@ impl Panel {
                     // release is the end of whatever the press started, wherever the ray has
                     // wandered to since.
                     if down {
-                        self.on_strip = self.pointer.is_some_and(|(_, y)| {
-                            y <= crate::surface::GRAB_STRIP * crate::render::SCALE
-                        });
+                        self.on_strip = match (self.strip, self.pointer) {
+                            (Some(strip), Some((x, y))) => strip.contains(egui::pos2(x, y)),
+                            _ => false,
+                        };
                     }
 
                     self.pressed = down;
@@ -660,21 +698,32 @@ impl Panel {
                     return;
                 }
 
-                // The offset frozen at the grab, reapplied to where the hand is now. That is what
-                // makes it feel attached rather than dragged: it keeps the distance and the
-                // bearing it had when it was caught.
+                // The offset frozen at the grab, reapplied to where the hand is now. Position and
+                // orientation together, which is what makes it feel attached rather than dragged:
+                // it keeps the distance, the bearing and the angle it had when it was caught, and
+                // it tilts and twists with the wrist.
+                //
+                // Nothing re-faces it at the Commander while it is held. That was tried and it is
+                // wrong: a panel forced upright and square cannot be tilted to read from below or
+                // turned to sit at an angle, which is most of what moving one is for.
                 let carried = hand.aim * grab.offset;
-                let at = glam::Vec3::from(carried.translation);
+                self.placed = Some(carried);
 
-                self.placed = Some(glam::Affine3A::from_rotation_translation(
-                    facing(session, at),
-                    at,
-                ));
+                // Carrying the small panel toward yourself is how it becomes the big one.
+                //
+                // Measured as distance pulled closer rather than as speed. Speed was the first
+                // attempt and it fired on any real movement at all - the small panel could not be
+                // carried anywhere without turning into the big one halfway. A pull is a specific
+                // thing: the panel ends up meaningfully nearer your head than where you caught it.
+                if self.mode == Mode::Mini
+                    && let Some(head) = session.head()
+                {
+                    let head = glam::Vec3::from(head.translation);
+                    let now = glam::Vec3::from(carried.translation).distance(head);
 
-                // Carrying the small panel is how it becomes the big one. The same surface being
-                // pulled open, which is why this is a mode and not a second overlay.
-                if self.mode == Mode::Mini && hand.speed.length() > PULL {
-                    self.change(Mode::Big);
+                    if grab.reach - now > PULL {
+                        self.change(Mode::Big);
+                    }
                 }
             }
             // Not carried. A trigger held on the grab strip picks it up.
@@ -687,9 +736,14 @@ impl Panel {
                     return;
                 };
 
+                let reach = session.head().map_or(f32::INFINITY, |head| {
+                    glam::Vec3::from(placed.translation).distance(head.translation.into())
+                });
+
                 self.held = Some(Grab {
                     device: hand.device,
                     offset: hand.aim.inverse() * placed,
+                    reach,
                 });
 
                 tracing::info!(target: "ward::vr", device = hand.device, "panel taken hold of");

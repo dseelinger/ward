@@ -122,16 +122,39 @@ fn summon_key() -> Value {
     serde_json::json!("Key_BackSlash")
 }
 
-pub static SETTINGS: &[crate::schema::Row] = &[crate::schema::Row {
-    key: "panel key",
-    help: "The key that shows and hides Ward's panel in the headset. \
+/// How much the panel is bent around the Commander.
+///
+/// Enough to bring the edges of a wide panel to roughly the distance its middle is at, and not so
+/// much that straight lines on it read as bent. Zero is flat, for anybody who would rather have
+/// that.
+fn curvature() -> Value {
+    serde_json::json!(0.15)
+}
+
+pub static SETTINGS: &[crate::schema::Row] = &[
+    crate::schema::Row {
+        key: "panel curve",
+        help: "How much Ward's panel is bent around you in the headset.                0 is flat, 1 would wrap it all the way round. Captions are never curved.",
+        kind: crate::schema::Field::Number {
+            floor: 0.0,
+            ceiling: 0.5,
+        },
+        card: "The headset",
+        doc: None,
+        protected: false,
+        default: curvature,
+    },
+    crate::schema::Row {
+        key: "panel key",
+        help: "The key that shows and hides Ward's panel in the headset. \
            Named the way Elite names keys, so Key_F9 or Key_Grave.",
-    kind: crate::schema::Field::Key,
-    card: "The headset",
-    doc: None,
-    protected: false,
-    default: summon_key,
-}];
+        kind: crate::schema::Field::Key,
+        card: "The headset",
+        doc: None,
+        protected: false,
+        default: summon_key,
+    },
+];
 
 static TOOLS: &[Tool] = &[
     Tool {
@@ -298,7 +321,13 @@ mod tests {
     fn the_summoning_key_is_one_ward_can_actually_read() {
         // The setting is a key name from Elite's vocabulary, and a default Ward cannot resolve
         // would be a hotkey that silently never fires.
-        let row = &SETTINGS[0];
+        // Found by name rather than by position. It was `SETTINGS[0]`, which passed until a
+        // second setting was added above it and then asserted about the wrong row entirely.
+        let row = SETTINGS
+            .iter()
+            .find(|row| row.key == "panel key")
+            .expect("the summoning key is a setting");
+
         let named = (row.default)();
         let named = named.as_str().expect("a key setting is a name");
 

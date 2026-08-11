@@ -76,7 +76,26 @@ The strip is there because everywhere else on the panel is a control, and a pres
 on a control is a click. It is the one part of the surface that does nothing, so
 it is the one part that can mean "pick this up".
 
-Dragging the small panel open turns it into the big one.
+Pulling the small panel **toward you** by a good arm's length turns it into the
+big one. Carrying it anywhere else leaves it small, which is the point of
+carrying it.
+
+It keeps the angle you hold it at, so you can tilt one to read from below or
+turn one to sit off to your side.
+
+## Curved
+
+The big panel is bent slightly around you, so its far edges sit at about the
+distance its middle does rather than further away. Straighten it or bend it more:
+
+```json
+{
+  "panel curve": 0
+}
+```
+
+Captions are never curved. They are two short lines in the middle of your view,
+where there are no far edges to bring closer.
 It then moves with your hand, keeping the distance it had when you caught it, so
 you can put it where you want rather than where Ward guessed. Grabbing the small
 panel pulls it open into the big one. Let go with your hand still moving and you

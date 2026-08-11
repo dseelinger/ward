@@ -428,8 +428,10 @@ impl eframe::App for Ward {
 
         // The window is always the big mode. Mini is the headset's answer to
         // being in the way of flying, and a window has a title bar for that.
-        let wants = surface::show(ui, &view, &mut self.local, surface::Mode::Big);
-        self.apply(wants);
+        // The strip the headset picks the panel up by is drawn here too, because there is one
+        // tree — it is simply a title bar the window has no use for.
+        let drawn = surface::show(ui, &view, &mut self.local, surface::Mode::Big);
+        self.apply(drawn.intents);
     }
 }
 

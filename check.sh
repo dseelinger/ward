@@ -244,6 +244,35 @@ else
     echo "    ok"
 fi
 
+# --- a silenced test says why -------------------------------------------------
+#
+# A muted test is worse than one that was never written. It reads as coverage,
+# it is counted in the run, and it teaches whoever finds it that a green build
+# with a hole in it is normal.
+#
+# The rule is not that nothing may be ignored. src/outside.rs already tells a
+# test that genuinely needs the wire to hold a permit and ignore itself, and a
+# test needing hardware no runner has is a real thing. The rule is that the
+# reason is written where the mute is, the way an exempt file in
+# check/coverage.txt carries one and a decision in the record carries a state.
+#
+# So a bare #[ignore] fails and #[ignore = "..."] passes. The attribute has to
+# start the line, because the same text appears inside the failure message in
+# src/outside.rs that tells you to write it.
+
+echo "==> a silenced test says why"
+
+muted=$(grep -rn --include='*.rs' -E '^[[:space:]]*#\[ignore\]' src tests 2>/dev/null)
+
+if [ -n "$muted" ]; then
+    printf '%s\n' "$muted" | sed 's/^/    /' >&2
+    echo "    FAIL: these tests are silenced and do not say why" >&2
+    echo "          write #[ignore = \"reason\"], or delete the test" >&2
+    status=1
+else
+    echo "    ok"
+fi
+
 echo "==> the installer keeps the data folder"
 
 SETUP="installer/ward.iss"

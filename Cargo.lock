@@ -2916,6 +2916,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "openvr-sys"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+]
+
+[[package]]
 name = "orbclient"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4639,6 +4646,7 @@ dependencies = [
  "cpal",
  "eframe",
  "futures-util",
+ "openvr-sys",
  "reqwest",
  "rodio",
  "roxmltree",

@@ -67,9 +67,17 @@ Name: "desktopicon"; Description: "Create a shortcut on the desktop"; GroupDescr
 
 [Files]
 Source: "..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
+
+; Valve's, and the one file Ward cannot link into itself. Windows resolves a
+; DLL from the directory of the running executable, so this has to sit beside
+; ward.exe rather than anywhere tidier. Without it the program does not start,
+; and the error names nothing that suggests why.
+Source: "..\target\release\openvr_api.dll"; DestDir: "{app}"; Flags: ignoreversion
+
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\NOTICE.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\crates\openvr-sys\vendor\LICENSE"; DestDir: "{app}"; DestName: "LICENSE-OpenVR.txt"; Flags: ignoreversion
 
 [Dirs]
 ; The one writable folder, and the one thing an upgrade must not touch. Settings,
@@ -90,3 +98,4 @@ Filename: "{app}\{#AppExe}"; Description: "Start {#AppName}"; Flags: nowait post
 ; Everything the installer put down goes. The data folder above does not, and
 ; neither does anything Ward wrote into it while running.
 Type: files; Name: "{app}\{#AppExe}"
+Type: files; Name: "{app}\openvr_api.dll"

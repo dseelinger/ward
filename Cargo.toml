@@ -6,11 +6,18 @@ license = "MIT"
 description = "A voice companion for Elite Dangerous."
 repository = "https://github.com/dseelinger/ward"
 
+# A workspace so the OpenVR bindings can be their own crate. They have to be:
+# bindgen runs in a build script, and a build script belongs to the crate it
+# builds, not to the one that uses it.
+[workspace]
+members = ["crates/openvr-sys"]
+
 [dependencies]
 anyhow = "1.0.104"
 cpal = "0.17.3"
 eframe = "0.36.1"
 futures-util = "0.3.33"
+openvr-sys = { version = "0.1.0", path = "crates/openvr-sys" }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "http2", "default-tls"] }
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "minimp3"] }
 roxmltree = "0.21.1"

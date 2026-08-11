@@ -45,9 +45,18 @@ scan_files() {
     # fails in CI the moment it is committed. That happened once, over a
     # British spelling in a comment.
     #
-    # Exclude the shared list from its own scan; it contains every pattern.
+    # Two exclusions, for different reasons.
+    #
+    # The shared list, because it contains every pattern and would match itself.
+    #
+    # Vendored files, because they are somebody else's published source and the
+    # only way to satisfy this check on one would be to edit it — which would
+    # defeat the point of vendoring, which is to hold the file they published.
+    # A check that can fail with no legitimate fix available is a check people
+    # learn to bypass.
     git ls-files -z --cached --others --exclude-standard |
-        grep -zv '^check/banned-words\.txt$'
+        grep -zv '^check/banned-words\.txt$' |
+        grep -zv '^crates/openvr-sys/vendor/'
 }
 
 # The list files allow '#' comments and blank lines, so they cannot be handed

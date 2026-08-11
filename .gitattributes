@@ -7,6 +7,13 @@
 *.sh        text eol=lf
 .githooks/* text eol=lf
 
+# Valve's header, import library and runtime DLL, exactly as they ship them.
+# The header is CRLF as it arrives, and the build script matches on either
+# ending rather than assuming one — but normalizing somebody else's source on
+# the way in is a change to a vendored file, and a vendored file is only worth
+# vendoring if it is the file they published.
+crates/openvr-sys/vendor/** -text
+
 # Journal fixtures are byte-preserved. A parser test has to see what Elite
 # actually wrote, not what Git normalized on the way in; the parser is expected
 # to handle both line endings, so a fixture has to keep whichever it was

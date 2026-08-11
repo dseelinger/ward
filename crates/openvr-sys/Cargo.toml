@@ -1,0 +1,18 @@
+[package]
+name = "openvr-sys"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+# Valve's, not Ward's. The vendored header, import library and runtime DLL are
+# all covered by vendor/LICENSE, and the attribution is in NOTICE.md.
+license = "BSD-3-Clause"
+description = "Generated bindings to Valve's OpenVR flat C API."
+
+# Declares the native library, so nothing else in the tree can link a second
+# copy of it without Cargo objecting.
+links = "openvr_api"
+
+[build-dependencies]
+bindgen = "0.72.1"

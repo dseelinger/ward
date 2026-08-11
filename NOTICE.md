@@ -23,6 +23,21 @@ cannot be traded for a permissive alternative.
 Both permit use, modification and redistribution, including as part of a
 larger work. Reserved font names must not be reused for a modified version.
 
+## OpenVR
+
+Ward draws in the headset through Valve's OpenVR, and ships three files of
+theirs: the C header the bindings are generated from, the import library, and
+`openvr_api.dll`, which is loaded at runtime and installed beside `ward.exe`.
+
+- **OpenVR** — BSD-3-Clause, Copyright (c) 2015, Valve Corporation. The full
+  text is in `crates/openvr-sys/vendor/LICENSE`, and it is redistributed with
+  Ward as that license requires.
+
+The header is vendored rather than fetched, and the bindings are generated from
+it rather than transcribed: the interface is a function-pointer table of several
+hundred slots, and taking the wrong slot is memory corruption rather than a
+compile error.
+
 ## Bundled native code
 
 The speech model runs on this machine, and the C++ that runs it is compiled

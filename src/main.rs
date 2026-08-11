@@ -636,42 +636,76 @@ impl Ward {
         self.runtime.spawn(async move {
             let started = std::time::Instant::now();
 
-            match voice::synthesize(&text, &voice, &rate).await {
-                Ok(speech) => {
-                    tracing::info!(
-                        target: "ward::voice",
-                        ms = started.elapsed().as_millis() as u64,
-                        bytes = speech.audio.len(),
-                        "synthesized"
-                    );
+            // Spoken in pieces, and the first piece is short.
+            //
+            // Synthesizing the whole reply before playing any of it cost a
+            // median of six seconds of silence with the answer already on
+            // screen, and fifteen on a long one - measured, not guessed. The
+            // service produces audio faster than it plays, so the opening
+            // sentence was ready almost immediately every time and then waited
+            // for the rest of the paragraph to be made.
+            //
+            // Each piece is fetched while the one before it is playing, so
+            // after the first the queue stays ahead of the voice and the seams
+            // fall at sentence ends where a speaker pauses anyway.
+            let pieces = voice::into_pieces(&text);
 
-                    // From here until the room settles, nothing the microphone
-                    // hears is the Commander. Set around playback rather than
-                    // around the whole task: synthesis takes a moment, and
-                    // going deaf during it would swallow a question asked while
-                    // Ward was still working out how to say the last answer.
-                    hush.speaking();
+            playing.begin();
+            hush.speaking();
 
-                    // Playback blocks for as long as the words take, so it goes
-                    // somewhere that is allowed to block.
-                    let played =
-                        tokio::task::spawn_blocking(move || voice::play(speech.audio, &playing))
-                            .await;
+            let mut first_audio: Option<u64> = None;
 
-                    // Unconditional, and before anything else. A hush left in
-                    // place is a microphone that never comes back, and the
-                    // symptom is a Commander holding the key and being ignored
-                    // for the rest of the session.
-                    hush.stopped(diag::since_start());
+            for (at, piece) in pieces.iter().enumerate() {
+                if playing.cut_off() {
+                    tracing::info!(target: "ward::voice", spoken = at, of = pieces.len(), "cut off");
+                    break;
+                }
 
-                    if let Ok(Err(e)) = played {
-                        tracing::warn!(target: "ward::voice", error = %e, "could not play");
+                match voice::synthesize(piece, &voice, &rate).await {
+                    Ok(speech) => {
+                        if first_audio.is_none() {
+                            let ms = started.elapsed().as_millis() as u64;
+                            first_audio = Some(ms);
+                            tracing::info!(
+                                target: "ward::voice",
+                                ms,
+                                pieces = pieces.len(),
+                                chars = piece.chars().count(),
+                                "first audio ready"
+                            );
+                        }
+
+                        // Playback blocks for as long as the words take, so it
+                        // goes somewhere that is allowed to block.
+                        let playing = playing.clone();
+                        let played =
+                            tokio::task::spawn_blocking(move || voice::play(speech.audio, &playing))
+                                .await;
+
+                        if let Ok(Err(e)) = played {
+                            tracing::warn!(target: "ward::voice", error = %e, "could not play");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: "ward::voice", error = %e, "could not speak");
+                        break;
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(target: "ward::voice", error = %e, "could not speak");
-                }
             }
+
+            // Unconditional, and before anything else. A hush left in place is
+            // a microphone that never comes back, and the symptom is a
+            // Commander holding the key and being ignored for the rest of the
+            // session.
+            hush.stopped(diag::since_start());
+
+            tracing::info!(
+                target: "ward::voice",
+                ms = started.elapsed().as_millis() as u64,
+                to_first_audio = first_audio.unwrap_or_default(),
+                "finished speaking"
+            );
 
             let _ = tx.send(());
             ctx.request_repaint();

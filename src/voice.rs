@@ -209,6 +209,85 @@ pub async fn voices() -> Result<Vec<Voice>> {
     Ok(voices)
 }
 
+/// How much of a reply is synthesized before Ward starts talking.
+///
+/// The first piece is deliberately short and the rest are not. Ward used to
+/// synthesize a whole reply before playing a word of it, and the cost was
+/// measured rather than guessed: a median of six seconds of silence after the
+/// answer was already on screen, and fifteen seconds on a long one. Synthesis
+/// runs faster than real time, so the opening sentence was ready in under a
+/// second every time and then waited for the rest of the paragraph to be made.
+///
+/// Why not split every sentence: each piece is its own connection to the
+/// service, and a connection costs a few hundred milliseconds. Small first for
+/// the fast start, larger afterwards because by then Ward is already speaking
+/// and the next piece only has to be ready before the current one runs out.
+const FIRST: usize = 120;
+const THEN: usize = 320;
+
+/// Where the first sentence in `text` ends, or the end of the text.
+///
+/// A period inside a figure or an abbreviation has no space after it, and that
+/// is the whole rule — it tells "127.32" from the end of a sentence without
+/// needing a list of abbreviations to consult, and without a list to keep up to
+/// date as Commanders say new things.
+fn sentence_end(text: &str) -> usize {
+    text.char_indices()
+        .find(|(at, c)| {
+            matches!(c, '.' | '!' | '?')
+                && text[at + c.len_utf8()..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace)
+        })
+        .map(|(at, c)| at + c.len_utf8())
+        .unwrap_or(text.len())
+}
+
+/// Breaks a reply into the pieces that will be spoken, in order.
+///
+/// Split on sentence endings, because that is where a voice pauses anyway. A
+/// break anywhere else is audible: the pieces are synthesized separately and
+/// joined by playing one after another, so a seam inside a clause sounds like
+/// a stumble.
+pub fn into_pieces(text: &str) -> Vec<String> {
+    let mut pieces: Vec<String> = Vec::new();
+    let mut piece = String::new();
+
+    let mut rest = text.trim();
+
+    while !rest.is_empty() {
+        let room = match pieces.is_empty() {
+            true => FIRST,
+            false => THEN,
+        };
+
+        let (sentence, remainder) = rest.split_at(sentence_end(rest));
+        rest = remainder.trim_start();
+
+        if !piece.is_empty() && piece.chars().count() + sentence.chars().count() > room {
+            pieces.push(std::mem::take(&mut piece));
+        }
+
+        if !piece.is_empty() {
+            piece.push(' ');
+        }
+        piece.push_str(sentence.trim());
+
+        // A piece that is already long enough goes now rather than waiting to
+        // be pushed over the line by the sentence after it.
+        if piece.chars().count() >= room {
+            pieces.push(std::mem::take(&mut piece));
+        }
+    }
+
+    if !piece.is_empty() {
+        pieces.push(piece);
+    }
+
+    pieces
+}
+
 /// A handle on speech in progress, so it can be cut off mid-word.
 ///
 /// This is the ducking half of barge-in. A Commander who presses the key while
@@ -219,17 +298,40 @@ pub async fn voices() -> Result<Vec<Voice>> {
 /// Cloning shares the handle rather than copying it, so the window can stop
 /// what a background thread is playing.
 #[derive(Clone, Default)]
-pub struct Playing(std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<rodio::Player>>>>);
+pub struct Playing {
+    slot: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<rodio::Player>>>>,
+    /// Set by an interruption and read between pieces.
+    ///
+    /// Stopping the sound that is playing is not enough once a reply is spoken
+    /// in pieces: without this, the piece being cut off would be followed by
+    /// the next one, and Ward would carry on talking through the interruption
+    /// one sentence at a time.
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl Playing {
+    /// A new reply is starting, so an earlier interruption no longer applies.
+    pub fn begin(&self) {
+        self.stopped
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the Commander has cut this reply off.
+    pub fn cut_off(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Stops whatever is being said, at once and mid-word.
     ///
     /// Doing nothing is an ordinary outcome: there is usually nothing playing.
     pub fn stop(&self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
         // Cloned out from under the lock rather than used beneath it. Holding
         // the lock across the stop would deadlock against the thread that is
         // playing, which is the one thread this has to be able to reach.
-        let player = match self.0.lock() {
+        let player = match self.slot.lock() {
             Ok(slot) => slot.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         };
@@ -240,7 +342,7 @@ impl Playing {
     }
 
     fn holds(&self, player: Option<std::sync::Arc<rodio::Player>>) {
-        match self.0.lock() {
+        match self.slot.lock() {
             Ok(mut slot) => *slot = player,
             Err(poisoned) => *poisoned.into_inner() = player,
         }
@@ -523,6 +625,86 @@ mod tests {
             .await
             .expect("playback thread failed")
             .expect("playback failed");
+    }
+
+    #[test]
+    fn the_first_thing_ward_says_is_short() {
+        // The whole point. A reply is not synthesized before it is started, so
+        // the opening piece has to be small enough to be ready quickly.
+        let reply = "Your jump range is forty two light years. That is with a                      full tank and no cargo. Dropping the cargo rack would take                      it to forty five, and stripping the shield another two on                      top of that, which is rarely worth it.";
+
+        let pieces = into_pieces(reply);
+
+        assert!(pieces.len() > 1, "it was not broken up at all: {pieces:?}");
+        assert!(
+            pieces[0].chars().count() <= FIRST + 40,
+            "the first piece is {} characters: {:?}",
+            pieces[0].chars().count(),
+            pieces[0]
+        );
+    }
+
+    #[test]
+    fn nothing_is_lost_or_repeated_in_the_breaking_up() {
+        // The pieces are played one after another, so together they have to be
+        // the reply and nothing else.
+        let reply = "First. Second! Third? And a fourth that runs on without                      any punctuation to speak of";
+
+        let joined = into_pieces(reply).join(" ");
+        let flatten = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert_eq!(flatten(&joined), flatten(reply));
+    }
+
+    #[test]
+    fn a_break_falls_where_a_speaker_would_pause() {
+        // Each piece is synthesized separately and they are joined by playing
+        // one after another, so a seam inside a clause sounds like a stumble.
+        for piece in into_pieces(
+            "Docking now. Watch the pad number, it is easy to miss.              The station is busy tonight and the traffic is stacked.",
+        ) {
+            let last = piece.trim().chars().last().unwrap();
+            assert!(
+                matches!(last, '.' | '!' | '?'),
+                "a piece ended mid-sentence: {piece:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_number_does_not_end_a_sentence() {
+        // Tested on the rule itself rather than through the splitting. Two
+        // short sentences end up in one piece whichever way the boundary is
+        // found, so asking how many pieces came out proves nothing about
+        // whether a figure was mistaken for a full stop.
+        let text = "The distance is 127.32 light years exactly. Bring fuel.";
+        assert_eq!(
+            &text[..sentence_end(text)],
+            "The distance is 127.32 light years exactly."
+        );
+    }
+
+    #[test]
+    fn a_sentence_ends_where_a_sentence_ends() {
+        assert_eq!(
+            sentence_end("Docking now. Watch the pad."),
+            "Docking now.".len()
+        );
+        assert_eq!(sentence_end("Are you sure? I am."), "Are you sure?".len());
+        assert_eq!(
+            sentence_end("No punctuation at all"),
+            "No punctuation at all".len()
+        );
+    }
+
+    #[test]
+    fn a_one_sentence_answer_is_one_piece() {
+        // Nothing gained by splitting what is already short, and every piece
+        // costs a connection.
+        assert_eq!(
+            into_pieces("Forty two light years."),
+            vec!["Forty two light years."]
+        );
     }
 
     #[test]

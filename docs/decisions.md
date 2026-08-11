@@ -371,10 +371,13 @@ Pure, integration without hardware, hardware, headset, and game. The line is
 what a test touches rather than how slow it is. A tier that cannot run says so,
 rather than passing silently.
 
-> open — no tier is marked anywhere. The only separation that exists is the
-> ignore attribute on six tests, which lumps the last three tiers together and
-> does not distinguish the first two at all.
-> [#123](https://github.com/dseelinger/ward/issues/123)
+> enforced — `check/coverage.txt` gives every file under `src/` a tier, and
+> `check/coverage.sh` fails on a file that has none, so a new module cannot
+> arrive without one. The tier is carried by the code rather than by any one
+> test: it says how far out you have to reach to exercise the file at all,
+> which is the only version of this that can be measured. The last three tiers
+> collapse into one exemption, because CI can run none of them — a device, a
+> service, a headset and a window are all equally out of reach from a runner.
 
 ## D38 — Three guarantees, held mechanically
 
@@ -383,13 +386,14 @@ loop that reaches a live provider spends money while nobody is watching.
 Coverage floors per tier, measured rather than specified. A release gate that
 installs the built program, launches it and asserts it survives.
 
-> open — the first is built. Every call that leaves the process says so first,
-> and a test that has not asked for permission fails on it, with the wiring at
-> each call site tested rather than only the mechanism. Two of the four things
-> that bullet asks for do not apply here: no test redirects the data folder,
-> and there is no mock-mode variable to clear. The coverage floors and the
-> release gate are [#123](https://github.com/dseelinger/ward/issues/123) and
-> [#125](https://github.com/dseelinger/ward/issues/125).
+> enforced — all three. Every call that leaves the process says so first and a
+> test without a permit fails on it, with the wiring at each call site tested
+> rather than only the mechanism (`src/outside.rs`). The floors are measured
+> per tier and a breach fails the build (`check/coverage.sh`). The release gate
+> installs, launches and watches Ward survive (`.github/workflows/gate.yml`).
+> Two of the four things the first bullet asks for do not apply here and are
+> recorded rather than invented: no test redirects the data folder, and there
+> is no mock-mode variable to clear.
 
 ## D39 — Everything writable in one folder beside the program
 

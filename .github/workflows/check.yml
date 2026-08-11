@@ -59,6 +59,32 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # Coverage floors per tier, from check/coverage.txt. Its own job because it
+  # builds the whole crate instrumented and is much slower than the one above,
+  # and because a floor being missed and a test failing are different answers
+  # that should not arrive as one red cross.
+  #
+  # Never a single percentage over everything. The fastest route to a high
+  # number is executing code without asserting anything, and one number rewards
+  # exactly that. A file that needs a device, a service, a headset or a window
+  # is marked not applicable rather than counted as zero, because a file that
+  # cannot be measured is a different thing from a file nobody tested.
+  coverage:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - shell: bash
+        run: sh check/coverage.sh
+
   # Licenses are an allowlist: anything not named in deny.toml fails. This
   # reads dependency metadata rather than building, so it does not need Windows.
   licenses:

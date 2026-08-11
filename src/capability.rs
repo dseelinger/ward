@@ -333,6 +333,82 @@ mod tests {
     }
 
     #[test]
+    fn a_capability_that_declares_nothing_answers_for_all_of_it() {
+        // Every one of these has a default, and a capability that takes them
+        // all is the shape a reactor-only capability has. Left uncalled, the
+        // defaults are code nobody has ever run - and the one that matters is
+        // `run`, which is what answers the model when a tool is asked for that
+        // its capability does not have.
+        assert!(Silent.settings().is_empty());
+        assert!(Silent.display().is_none());
+        assert!(Silent.tools().is_empty());
+
+        let answer = Silent.run("nonexistent", &json!({}));
+        assert!(
+            answer.contains("silent") && answer.contains("nonexistent"),
+            "a capability asked for a tool it does not have should say so: {answer}"
+        );
+    }
+
+    #[test]
+    fn an_event_reaches_every_capability_including_the_ones_that_ignore_it() {
+        // The default `on_event` does nothing, and doing nothing has to be safe
+        // for every capability at once - this is the path every journal line in
+        // a session takes.
+        let record = crate::journal::Record {
+            event: "FSDJump".to_string(),
+            timestamp: None,
+            raw: json!({ "event": "FSDJump" }),
+        };
+
+        registry().on_event(&record);
+    }
+
+    #[test]
+    fn a_flag_argument_is_described_to_the_model_as_a_boolean() {
+        // The third kind. Text and Number are covered by the tool above; this
+        // one had never been through the schema at all, and a wrong type is the
+        // sort of thing the model quietly works around rather than reports.
+        static FLAGGED: &[Tool] = &[Tool {
+            name: "set_thing",
+            description: "Sets a thing.",
+            slots: &[Slot {
+                param: "on",
+                kind: Kind::Flag,
+                required: true,
+                help: "Whether it is on.",
+                example: "true",
+            }],
+        }];
+
+        struct Flagged;
+
+        impl Capability for Flagged {
+            fn id(&self) -> &'static str {
+                "flagged"
+            }
+            fn group(&self) -> &'static str {
+                "test"
+            }
+            fn one_liner(&self) -> &'static str {
+                "Takes a flag."
+            }
+            fn examples(&self) -> &'static [&'static str] {
+                &["turn the thing on"]
+            }
+            fn tools(&self) -> &'static [Tool] {
+                FLAGGED
+            }
+        }
+
+        let schema = &Registry::new(vec![Box::new(Flagged)]).tools()[0];
+        assert_eq!(
+            schema["input_schema"]["properties"]["on"]["type"],
+            "boolean"
+        );
+    }
+
+    #[test]
     fn only_capabilities_with_tools_contribute_schemas() {
         assert_eq!(registry().tools().len(), 1);
     }

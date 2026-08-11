@@ -299,6 +299,43 @@ mod tests {
     }
 
     #[test]
+    fn every_row_can_produce_its_own_default() {
+        // Defaults live in code rather than in a shipped file, so this is the
+        // only place they exist. A row whose default cannot be produced is a
+        // setting that reads as empty and takes whatever the code falls back to
+        // somewhere else, which is how a default and a documented default start
+        // disagreeing.
+        let rows = all();
+        assert!(!rows.is_empty(), "there are no settings at all");
+
+        for row in &rows {
+            let value = (row.default)();
+
+            assert!(
+                !value.is_null(),
+                "{} has no default, so nothing can be reset to it",
+                row.key
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_is_written_into_a_box_the_way_a_person_would_type_it() {
+        // A string goes in bare. Quoting it would put quotation marks in the
+        // box, and the Commander would then either delete them or leave them in
+        // and store a name with quotes around it.
+        assert_eq!(write(&json!("Key_RightShift")), "Key_RightShift");
+
+        // Nothing set reads as an empty box rather than the word null, which is
+        // what makes the placeholder behind it visible.
+        assert_eq!(write(&Value::Null), "");
+
+        // Anything else is written as it is, so a number is a number.
+        assert_eq!(write(&json!(1.35)), "1.35");
+        assert_eq!(write(&json!(true)), "true");
+    }
+
+    #[test]
     fn every_setting_has_a_row_and_every_row_has_a_key() {
         let rows = all();
 

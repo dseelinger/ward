@@ -1,0 +1,56 @@
+# What each file's tests can reach, and therefore what its coverage must be.
+#
+#   pure          95%   Needs nothing but the process it runs in.
+#   integration   70%   Needs the filesystem, fixtures, or a clock.
+#   exempt         --   Needs a device, a service, a headset or a window, so
+#                       the tests that would cover it cannot run in CI at all.
+#
+# Three states and no fourth, the same discipline as the decision record. Every
+# file under src/ appears here exactly once and the check fails on one that does
+# not, so a new module cannot quietly arrive with no floor.
+#
+# An exemption carries a reason. "Not applicable" rather than zero is the point:
+# a floor of zero reads as a file nobody bothered with, and a file that cannot
+# be measured is a different thing from a file nobody tested.
+#
+# The tier is a property of the code, not of any one test. It says how far out
+# you have to reach to exercise the file at all.
+
+# --- pure -------------------------------------------------------------------
+
+bindings.rs      pure
+captions.rs      pure
+outside.rs       pure
+schema.rs        pure
+shown.rs         pure
+speech.rs        pure
+sse.rs           pure
+
+# --- integration ------------------------------------------------------------
+
+capabilities.rs  integration
+checklist.rs     integration
+config.rs        integration
+engine.rs        integration
+honk.rs          integration
+journal.rs       integration
+press.rs         integration
+replay.rs        integration
+secrets.rs       integration
+
+# --- exempt -----------------------------------------------------------------
+#
+# Ordered by how much it would take to remove the exemption, nearest first.
+
+capability.rs    exempt  its test module declares tool schemas as static data, which is compile-time and never executes; every line of its running code is covered
+diag.rs          exempt  installs process-wide logging, which can only happen once per process and so cannot be exercised by more than one test
+anthropic.rs     exempt  the request and streaming path needs a service to talk to; what does not - event parsing, error messages, request composition - is tested directly. A transport seam would remove this, and that is the same seam a second provider needs
+voice.rs         exempt  synthesis is a live websocket. The half that is not - breaking a reply into what gets spoken - is covered heavily, and splitting the file would let that half carry a floor
+listen.rs        exempt  opens a capture device and polls a key through the operating system
+mic.rs           exempt  opens a capture device
+transcribe.rs    exempt  loads a half-gigabyte speech model that is not in the repository
+page.rs          exempt  draws the settings page, which needs a window
+main.rs          exempt  is the window
+overlay.rs       exempt  needs a headset, or at least a Vulkan device
+render.rs        exempt  needs a graphics device
+vr.rs            exempt  needs SteamVR running

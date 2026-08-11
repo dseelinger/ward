@@ -300,6 +300,59 @@ mod tests {
     }
 
     #[test]
+    fn a_number_is_accepted_at_its_limits_and_refused_past_them() {
+        // Both boundaries, both sides. A range that excludes its own endpoints
+        // is a setting a Commander cannot set to the value the help text tells
+        // them is allowed, and it reads as the box simply refusing them.
+        let row = Row {
+            key: "text size",
+            help: "How large the text is.",
+            kind: Field::Number {
+                floor: 0.5,
+                ceiling: 4.0,
+            },
+            card: "Interface",
+            doc: None,
+            protected: false,
+            default: || json!(1.35),
+        };
+
+        assert!(read(&row, "0.5").is_ok(), "the floor is allowed");
+        assert!(read(&row, "4").is_ok(), "the ceiling is allowed");
+        assert!(read(&row, "0.49").is_err());
+        assert!(read(&row, "4.01").is_err());
+        assert!(read(&row, "wide").is_err());
+    }
+
+    #[test]
+    fn the_cards_are_every_card_once_in_the_order_they_are_declared() {
+        // Three claims, because each fails differently: no cards at all is a
+        // settings page with nothing on it, a repeated card is the same heading
+        // twice with the rows split between them, and the order is what puts
+        // the things people change often near the top.
+        let cards = cards();
+
+        assert!(
+            !cards.is_empty(),
+            "the settings page would have no headings"
+        );
+
+        let mut sorted = cards.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), cards.len(), "a card appears twice: {cards:?}");
+
+        for row in all() {
+            assert!(
+                cards.contains(&row.card),
+                "{} belongs to {}, which is not a card on the page",
+                row.key,
+                row.card
+            );
+        }
+    }
+
+    #[test]
     fn every_row_can_produce_its_own_default() {
         // Defaults live in code rather than in a shipped file, so this is the
         // only place they exist. A row whose default cannot be produced is a

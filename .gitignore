@@ -7,3 +7,6 @@
 # The built documentation site. The pages are the source; this is what the
 # builder makes of them.
 /book/
+
+# Mutation testing scratch. cargo-mutants copies the tree here to change it.
+/mutants.out*/

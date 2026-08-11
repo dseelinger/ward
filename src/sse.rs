@@ -105,6 +105,20 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_that_changes_line_endings_partway_still_reads_in_order() {
+        // Both separators present at once, which is what a proxy rewriting some
+        // lines and not others produces. The earlier one is the end of the
+        // first block; taking the later one would swallow a whole event into
+        // the block before it and hand back one reply with two inside it.
+        let mut p = Parser::new();
+
+        assert_eq!(
+            p.push("data: first\n\ndata: second\r\n\r\ndata: third\n\n"),
+            vec!["first", "second", "third"]
+        );
+    }
+
+    #[test]
     fn yields_several_blocks_from_one_chunk() {
         let mut p = Parser::new();
         let got = p.push("data: one\n\ndata: two\n\ndata: three\n\n");

@@ -1,0 +1,81 @@
+name: mutants
+
+# Whether anything would notice the code changing.
+#
+# The coverage floors say a line ran. They say nothing about whether a test
+# would object to that line behaving differently, and the header of the floors
+# check names that failure itself: the fastest route to a high number is
+# executing code without asserting anything. This is the instrument that can see
+# it. The code is changed on purpose and the suite is expected to go red; a
+# mutant that survives is a line covered by nothing that would notice.
+#
+# Its own workflow, and never on a push. It is slow by construction - one build
+# and one test run per mutant - and a push has to stay quick for a project with
+# one maintainer. It can be started by hand against any branch, the same way the
+# release gate can.
+#
+# The pure tier first. Those files need nothing but the process they run in, so
+# a survivor is unambiguous rather than an artifact of something the runner
+# could not reach.
+
+on:
+  workflow_dispatch:
+    inputs:
+      files:
+        description: >
+          Which files to mutate. Defaults to the pure tier. Give a
+          space-separated list to look somewhere else.
+        type: string
+        default: >-
+          src/bindings.rs src/captions.rs src/outside.rs src/schema.rs
+          src/shown.rs src/speech.rs src/sse.rs
+
+  # Weekly, because the answer does not change between two commits but it does
+  # change over a month of them, and a survivor nobody looks for is a survivor
+  # nobody kills.
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    runs-on: windows-latest
+    # Generous. It is one build and one test run per mutant, and the point of
+    # this workflow is that it is allowed to be slow.
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mutants
+
+      - uses: taiki-e/install-action@cargo-mutants
+
+      - name: Change the code and see whether anything objects
+        shell: bash
+        run: |
+          files="${{ inputs.files }}"
+          files="${files:-src/bindings.rs src/captions.rs src/outside.rs src/schema.rs src/shown.rs src/speech.rs src/sse.rs}"
+
+          args=""
+          for file in $files; do
+            args="$args --file $file"
+          done
+
+          # No floor yet, deliberately. D38's own lesson is that a number picked
+          # in advance is a number nobody has watched fail, so this reports and
+          # the survivors are read. A floor goes in once there is a score that
+          # has been looked at.
+          cargo mutants -j 4 $args
+
+      # Kept whatever the result, because the interesting run is the one that
+      # found something.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants
+          path: mutants.out/

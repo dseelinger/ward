@@ -304,6 +304,31 @@ mod tests {
     }
 
     #[test]
+    fn a_binding_the_game_wrote_but_left_blank_is_not_a_binding() {
+        // Elite writes both shapes for an action nobody has bound: a device of
+        // {NoDevice}, and an entry with a device but no key on it. Either alone
+        // means unbound, and taking only the pair of them as unbound reports a
+        // key named the empty string as something Ward could press.
+        let no_device = r#"<Root><UseBoostJuice>
+            <Primary Device="{NoDevice}" Key="" />
+            <Secondary Device="{NoDevice}" Key="" />
+        </UseBoostJuice></Root>"#;
+
+        assert_eq!(lookup(no_device, "UseBoostJuice"), Binding::Unbound);
+
+        let no_key = r#"<Root><UseBoostJuice>
+            <Primary Device="Keyboard" Key="" />
+            <Secondary Device="{NoDevice}" Key="" />
+        </UseBoostJuice></Root>"#;
+
+        assert_eq!(
+            lookup(no_key, "UseBoostJuice"),
+            Binding::Unbound,
+            "a keyboard entry with no key on it is not something Ward can press"
+        );
+    }
+
+    #[test]
     fn a_key_on_the_stick_is_not_confused_with_a_key_on_the_keyboard() {
         // Joystick buttons carry names of their own, and matching on the name
         // alone would report a stick button as a keyboard clash.

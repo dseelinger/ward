@@ -1325,6 +1325,51 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_long_reply_arriving_a_few_characters_at_a_time_is_said_whole() {
+        // What a real turn looks like, which the tests above do not: several
+        // sentences, arriving in fragments that fall wherever the model happens
+        // to break them rather than on anything meaningful.
+        // The em dash is not decoration. It is three bytes, the splitter used to
+        // step one byte past a clause mark, and slicing a string inside a
+        // character takes down the thread that asked - which is now the thread
+        // Ward runs on. It presented as half an answer on screen and a companion
+        // that never spoke again.
+        let reply = "I don't actually have that stored and I would rather say so \
+                     than guess \u{2014} the Thargoid Wars are recent history and I \
+                     have no source for them here. What I can tell you is what your \
+                     journal says: where you are, what you are flying, and what \
+                     is on your list. Ask me any of those and I will be exact.";
+
+        let chunks: Vec<Event> = reply
+            .as_bytes()
+            .chunks(5)
+            .map(|c| Event::Text(String::from_utf8_lossy(c).into_owned()))
+            .chain(std::iter::once(Event::Done { stop_reason: None }))
+            .collect();
+
+        let (ward, said, mic, _) = engine(chunks);
+
+        mic.send(listen::Voiced::Words("tell me about the wars".into()))
+            .unwrap();
+
+        assert!(
+            until(|| ward.view().history.len() == 2).await,
+            "the turn never finished; the engine stopped at {:?}",
+            ward.view().pending
+        );
+
+        assert_eq!(ward.view().history[1].text, reply);
+
+        // Nothing lost and nothing repeated. The pieces are played one after
+        // another, so what the voice was given has to be the reply.
+        assert!(
+            until(|| said.lock().unwrap().join(" ") == reply).await,
+            "what was said was not the reply: {:?}",
+            said.lock().unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_failed_turn_is_said_out_loud_rather_than_only_shown() {
         // A Commander in a headset cannot read a window that is behind a game.
         // A failure that only ever reaches the screen is a failure they

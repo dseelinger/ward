@@ -286,8 +286,16 @@ fn break_at(text: &str, room: usize) -> usize {
     let cut = at_character(text, room);
 
     // A clause break, taken with its punctuation so the pause is spoken.
+    //
+    // Past the mark by its own width, not by one byte. Three of the four are a
+    // single byte and the em dash is three, so stepping by one lands inside the
+    // character — and slicing a string there does not return a bad answer, it
+    // takes down whatever thread asked. That went unnoticed while this ran on a
+    // thread whose death cost only the voice; it is now on the one that runs
+    // Ward, and the model writes em dashes constantly.
     if let Some(at) = text[..cut].rfind([',', ';', ':', '\u{2014}']) {
-        return at + 1;
+        let mark = text[at..].chars().next().map_or(1, char::len_utf8);
+        return at + mark;
     }
 
     // Failing that, a word boundary. Only a single unbroken run of characters
@@ -844,6 +852,28 @@ mod tests {
         assert_eq!(
             sentence_end("No punctuation at all"),
             "No punctuation at all".len()
+        );
+    }
+
+    #[test]
+    fn a_clause_mark_wider_than_one_byte_is_not_cut_through_the_middle() {
+        // An em dash is three bytes. The break past a clause mark stepped over
+        // one of them, which lands inside the character and takes the whole
+        // process down rather than returning a bad answer.
+        //
+        // It needs a sentence long enough to force a clause break to reach, so
+        // it sat here unexploded for as long as the splitting was done on a
+        // thread whose death cost only the voice.
+        let text = "The Thargoid Wars are recent history and I have no source for them here \
+                    \u{2014} nothing I could tell you would be grounded in anything, and being \
+                    confidently wrong about that is worse than saying nothing at all.";
+
+        let pieces = into_pieces(text);
+
+        assert_eq!(
+            pieces.join(" ").replace("  ", " "),
+            text.split_whitespace().collect::<Vec<_>>().join(" "),
+            "the reply came apart: {pieces:?}"
         );
     }
 

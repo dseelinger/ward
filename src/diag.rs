@@ -146,10 +146,51 @@ pub fn init(data_dir: &Path) -> Result<Guard> {
 
     registry.init();
 
+    watch_for_panics();
+
     Ok(Guard {
         _human: human_guard,
         _machine: machine_guard,
     })
+}
+
+/// Writes down a panic before the thread it happened on disappears.
+///
+/// Ward is several threads and a good many tasks, and a panic takes only the
+/// one it happened on. The window carries on drawing, the microphone carries on
+/// listening, and the part that died does so in complete silence.
+///
+/// This exists because that cost an hour. A three-byte character sliced through
+/// the middle killed the task running the turn, and what it looked like from
+/// outside was half an answer on screen and a companion that never spoke again -
+/// with a log that simply stopped, mid-reply, saying nothing about why. Every
+/// theory about what had gone wrong was reasoning from an absence.
+///
+/// The default hook still runs after this one, so a debug build keeps its
+/// console message and its backtrace.
+fn watch_for_panics() {
+    let already = std::panic::take_hook();
+
+    std::panic::set_hook(Box::new(move |panic| {
+        // The payload is whatever was passed to `panic!`, which is one of two
+        // types in practice and neither of them implements anything useful.
+        let said = panic
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".to_string());
+
+        tracing::error!(
+            target: "ward::app",
+            reason = %said,
+            at = %panic.location().map(|l| l.to_string()).unwrap_or_default(),
+            thread = std::thread::current().name().unwrap_or("unnamed"),
+            "something died"
+        );
+
+        already(panic);
+    }));
 }
 
 #[cfg(test)]

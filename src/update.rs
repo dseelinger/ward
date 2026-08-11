@@ -515,6 +515,40 @@ mod tests {
         assert!(matches!(look("0.1.0", false).await, Answer::Unknown(_)));
     }
 
+    /// The listing the service actually returned for the first release.
+    ///
+    /// Every other test here builds its own, which proves the reading and not
+    /// the reading of anything real. This one could not be written until there
+    /// was a release to read, and the shape it fixes is the one thing no
+    /// hand-written example can: what the service calls its fields and where it
+    /// puts the download.
+    const REAL: &str = include_str!("../tests/fixtures/release-latest.json");
+
+    #[test]
+    fn the_first_release_reads_the_way_the_code_expects() {
+        let listing: serde_json::Value = serde_json::from_str(REAL).unwrap();
+
+        // Somebody already on it is told nothing, rather than being offered
+        // what they are running.
+        assert_eq!(read(&listing, "0.1.0"), Answer::UpToDate);
+        assert_eq!(read(&listing, "0.2.0"), Answer::UpToDate);
+
+        // Somebody behind it is offered it, with both of the things needed to
+        // install it safely.
+        let Answer::Newer(release) = read(&listing, "0.0.9") else {
+            panic!("the real listing should be an update for an older Ward");
+        };
+
+        assert_eq!(release.version, "0.1.0");
+        assert!(release.installer.ends_with("ward-setup-0.1.0.exe"));
+        assert!(release.checksums.ends_with("SHA256SUMS.txt"));
+
+        // And both come from somewhere Ward will follow, which is what stops a
+        // listing being a way to point it at anything at all.
+        assert!(fenced(&release.installer));
+        assert!(fenced(&release.checksums));
+    }
+
     #[test]
     fn a_checksum_is_matched_against_the_name_it_belongs_to() {
         let sums = "\

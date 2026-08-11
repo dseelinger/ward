@@ -210,26 +210,31 @@ fn show_captions(
 /// No border, no title, no controls. There is nothing here to interact with,
 /// and anything that looks interactive in a caption layer is a lie — the layer
 /// does not take input at all.
-fn draw_caption(ui: &mut egui::Ui, caption: &crate::captions::Caption) {
-    // Sits at the bottom of the layer, so a two-line caption grows upward and
-    // the last line stays where the eye already is.
-    ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-        egui::Frame::new()
-            .fill(BOX)
-            .inner_margin(egui::Margin {
-                left: 14,
-                right: 14,
-                top: 2,
-                bottom: 2,
-            })
-            .corner_radius(2)
-            .show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    // No gap between the two lines of one caption, and no
-                    // padding above or below beyond a hair. A two line caption
-                    // was drawing a box nearly three lines tall, which over a
-                    // cockpit is a third more of the view blacked out than the
-                    // words needed.
+pub(crate) fn draw_caption(ui: &mut egui::Ui, caption: &crate::captions::Caption) {
+    // An area rather than a layout, and that is the whole of the fix for a box
+    // that was drawing four lines tall for two lines of words. A layout is
+    // handed the space it sits in - the entire layer, here - and a frame around
+    // it grows to match, so the black box was the overlay rather than the
+    // caption. An area is measured by what is put in it.
+    //
+    // Anchored to the bottom, so a two line caption grows upward and the last
+    // line stays where the eye already is.
+    egui::Area::new(egui::Id::new("ward-caption"))
+        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -4.0))
+        .interactable(false)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(BOX)
+                .inner_margin(egui::Margin {
+                    left: 14,
+                    right: 14,
+                    top: 2,
+                    bottom: 2,
+                })
+                .corner_radius(2)
+                .show(ui, |ui| {
+                    // No gap between the two lines of one caption. The box is
+                    // as tall as the words and no taller.
                     ui.spacing_mut().item_spacing.y = 0.0;
 
                     for (at, line) in caption.lines.iter().enumerate() {
@@ -243,6 +248,115 @@ fn draw_caption(ui: &mut egui::Ui, caption: &crate::captions::Caption) {
                         ui.label(egui::RichText::new(text).size(TEXT).color(INK));
                     }
                 });
-            });
-    });
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Draws a caption and measures the box it drew.
+    ///
+    /// Permanently ignored: it needs a Vulkan device. Run it when something
+    /// about the caption looks wrong. "The box is too tall" cannot be measured
+    /// through a headset and can be measured exactly here - it was four lines
+    /// tall for two lines of words, and the layout was the reason.
+    ///
+    /// The bitmap is for geometry, not for color: the transparent parts are
+    /// filled with a flat grey that stands in for a cockpit, so contrast in the
+    /// file is not contrast in the headset.
+    ///
+    /// ```text
+    /// cargo test caption_to_look_at -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a Vulkan device"]
+    fn caption_to_look_at() {
+        let mut renderer = crate::render::Renderer::new(PIXELS.0, PIXELS.1).expect("no renderer");
+
+        let caption = crate::captions::Caption {
+            lines: vec![
+                "The Thargoids are an ancient alien species".to_string(),
+                "humanity first clashed with centuries ago.".to_string(),
+            ],
+            speaker: None,
+        };
+
+        // Twice. An anchored area is placed from the size it had last frame,
+        // so the first pass has nothing to measure and the second is what the
+        // Commander sees.
+        renderer.draw(|ui| draw_caption(ui, &caption));
+        renderer.draw(|ui| draw_caption(ui, &caption));
+
+        let pixels = renderer.read_back();
+        let (width, height) = (PIXELS.0 as usize, PIXELS.1 as usize);
+
+        // Where the box actually is, measured rather than guessed: the first
+        // and last row with anything drawn on it.
+        let opaque = |row: usize| (0..width).any(|x| pixels[(row * width + x) * 4 + 3] > 8);
+        let top = (0..height).find(|r| opaque(*r));
+        let bottom = (0..height).rev().find(|r| opaque(*r));
+
+        if let (Some(top), Some(bottom)) = (top, bottom) {
+            let tall = bottom - top + 1;
+            println!(
+                "box is {tall} of {height} pixels tall, rows {top}..{bottom}, \
+                 which is {:.1} lines of {}pt text",
+                tall as f32 / (TEXT * crate::render::SCALE),
+                TEXT
+            );
+        } else {
+            println!("nothing was drawn at all");
+        }
+
+        let out = std::env::temp_dir().join("ward-caption.bmp");
+        write_bitmap(&out, &pixels, PIXELS.0, PIXELS.1);
+        println!("written to {}", out.display());
+    }
+
+    /// A bitmap, because it needs no library and any viewer opens one.
+    #[cfg(test)]
+    fn write_bitmap(path: &std::path::Path, rgba: &[u8], width: u32, height: u32) {
+        let row = (width * 3).div_ceil(4) * 4;
+        let size = 54 + row * height;
+
+        let mut out: Vec<u8> = Vec::with_capacity(size as usize);
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&54u32.to_le_bytes());
+        out.extend_from_slice(&40u32.to_le_bytes());
+        out.extend_from_slice(&(width as i32).to_le_bytes());
+        out.extend_from_slice(&(height as i32).to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&24u16.to_le_bytes());
+        for _ in 0..6 {
+            out.extend_from_slice(&0u32.to_le_bytes());
+        }
+
+        // Bitmaps run bottom to top, and the caption is drawn over whatever is
+        // behind it - so the transparent parts are filled with a mid grey to
+        // stand in for a cockpit rather than reading as white.
+        for y in (0..height).rev() {
+            let mut written = 0;
+            for x in 0..width {
+                let at = ((y * width + x) * 4) as usize;
+                let (r, g, b, a) = (
+                    rgba[at] as u32,
+                    rgba[at + 1] as u32,
+                    rgba[at + 2] as u32,
+                    rgba[at + 3] as u32,
+                );
+                let over = |c: u32| ((c * a + 90 * (255 - a)) / 255) as u8;
+                out.extend_from_slice(&[over(b), over(g), over(r)]);
+                written += 3;
+            }
+            while written < row {
+                out.push(0);
+                written += 1;
+            }
+        }
+
+        std::fs::write(path, out).expect("could not write the bitmap");
+    }
 }

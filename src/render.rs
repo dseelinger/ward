@@ -154,6 +154,67 @@ impl Renderer {
         })
     }
 
+    /// The image as bytes, so a caption can be looked at without a headset.
+    #[cfg(test)]
+    pub fn read_back(&self) -> Vec<u8> {
+        const BYTES_PER_PIXEL: u32 = 4;
+        let (width, height) = self.size;
+
+        // wgpu wants each row of a copy aligned, so the buffer is usually wider than the image
+        // and the padding is stripped after mapping.
+        let aligned = width * BYTES_PER_PIXEL;
+        let padded = aligned.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("read back"),
+            size: u64::from(padded) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("read back"),
+            });
+        encoder.copy_texture_to_buffer(
+            self.target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("the queue drains");
+
+        let mapped = slice
+            .get_mapped_range()
+            .expect("the buffer was just mapped");
+        let mut pixels = Vec::with_capacity((aligned * height) as usize);
+        for row in 0..height {
+            let start = (row * padded) as usize;
+            pixels.extend_from_slice(&mapped[start..start + aligned as usize]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        pixels
+    }
+
     /// Which adapter this ended up on, and over which backend.
     #[must_use]
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {

@@ -111,6 +111,37 @@ check_list "$LOCAL" || status=1
 # settings and stored key disappearing under a version bump - but it is
 # invisible until a second release exists, which is exactly too late.
 
+# --- the engine does not know about the window --------------------------------
+#
+# Ward is worn rather than watched, so the turn has to run whether or not
+# anything is drawing it. It did not: the turn lived inside the window's paint
+# function, and a minimized window does not paint, so Ward went deaf the moment
+# it was out of the way - along with the journal, and everything that reacts to
+# it.
+#
+# The engine now runs on its own and wakes the window through a closure it was
+# handed. This keeps it that way. The failure mode being guarded against is not
+# somebody arguing for the dependency - it is somebody reaching for `ctx`
+# because it is what every other file has, and nothing complaining until a
+# Commander is in a headset wondering why holding the key does nothing.
+
+echo "==> the engine does not know about the window"
+
+ENGINE="src/engine.rs"
+
+if [ ! -f "$ENGINE" ]; then
+    echo "    FAIL: no engine at $ENGINE" >&2
+    echo "          if it moved, move this check with it" >&2
+    status=1
+elif grep -n -E '\b(egui|eframe)\b' "$ENGINE" >&2; then
+    echo "    FAIL: $ENGINE names the window toolkit" >&2
+    echo "          the engine must run with no window; wake one through the" >&2
+    echo "          callback it was handed instead" >&2
+    status=1
+else
+    echo "    ok"
+fi
+
 echo "==> the installer keeps the data folder"
 
 SETUP="installer/ward.iss"

@@ -1,9 +1,10 @@
 //! Ward — a voice companion for Elite Dangerous.
 //!
-//! This is the typed turn: ask a question, read the answer. Speech arrives
-//! next, on both ends. Typing is not scaffolding on the way to voice — it stays
-//! for good, because Ward has to be reachable without a microphone or a
-//! speaker.
+//! This file is the window, and the window is a viewer. What Ward actually does
+//! lives in [`engine`], on a task of its own, because Ward is worn rather than
+//! watched: the window spends most of its life minimized behind a game, and a
+//! minimized window does not paint. Everything here reads a picture the engine
+//! published and sends back what the Commander asked for.
 
 // A console window behind the app is noise for a released build, and in VR it
 // is a window you cannot get to. Kept in debug builds, where panics are worth
@@ -18,6 +19,7 @@ mod captions;
 mod checklist;
 mod config;
 mod diag;
+mod engine;
 mod honk;
 mod journal;
 mod listen;
@@ -40,13 +42,12 @@ mod transcribe;
 mod voice;
 mod vr;
 
-use anthropic::{Client, Event, Message, Role};
+use anthropic::{Client, Role};
 use std::sync::Arc;
 
 use config::{Settings, State};
 use eframe::egui;
-use serde_json::json;
-use speech::{Act, Arbiter, Body, Register, Speaker};
+use engine::Intent;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 fn main() -> eframe::Result<()> {
@@ -199,14 +200,6 @@ fn as_the_window_system_counts_it(points: egui::Vec2, zoom: f32) -> egui::Vec2 {
     points * zoom
 }
 
-/// How long the voice service gets to answer before Ward gives up on a piece.
-///
-/// Generous, because synthesis of a long piece legitimately takes seconds, and
-/// finite because the alternative turned out to be forever: an unanswered
-/// connection held the speech stream open and every later reply arrived on
-/// screen in silence.
-const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
-
 /// Checks the things that fail quietly.
 ///
 /// Every one of these stands for an evening somebody could otherwise lose. A
@@ -323,63 +316,34 @@ enum Screen {
 
 struct Ward {
     settings: Settings,
-    registry: Arc<capability::Registry>,
     state: State,
+    /// Kept alive here because it is what the engine runs on. Dropping it is how
+    /// everything Ward is doing stops, which is what closing the window should
+    /// mean and nothing sooner.
     runtime: tokio::runtime::Runtime,
     screen: Screen,
-    client: Option<Client>,
-
-    history: Vec<Message>,
-    prompt: String,
-
-    /// The reply as it arrives. Held apart from `history` so a turn that fails
-    /// halfway leaves no half-message behind pretending to be an answer.
-    pending: Option<String>,
-    events: Option<UnboundedReceiver<Event>>,
-    problem: Option<String>,
-    /// A capability currently running, so a pause has a reason on screen.
-    using: Option<String>,
-    /// Follows the game's journal. Absent until a folder with one in it turns
-    /// up, and re-checked periodically, because Elite starts a new file every
-    /// session and may not be running when Ward is.
-    watcher: Option<journal::Watcher>,
-    situation: journal::Situation,
-    last_looked: std::time::Duration,
-    /// Everything Ward emits goes through here. Nothing speaks yet; captions
-    /// and the transcript already render off it, so when a voice arrives it
-    /// attaches to the same stream rather than beside it.
-    speech: Arbiter,
-    /// When the current act started holding the caption.
-    spoke_at: std::time::Duration,
-    /// Signals that speaking finished, so the stream can move on. Silence
-    /// falls back to the caption's own timing, which is what keeps a failure
-    /// to speak from also freezing what is on screen.
-    spoken: Option<UnboundedReceiver<()>>,
-    /// Speech in progress, so holding the key can cut it off mid-word.
-    playing: voice::Playing,
-    /// What is on screen in the headset. Shared with the thread that draws it,
-    /// which runs on SteamVR's clock rather than the window's.
-    captions: std::sync::Arc<std::sync::Mutex<captions::Captions>>,
-    /// Tells the microphone to ignore Ward's own voice coming back through the
-    /// room. The gate half of barge-in; the handle above is the duck half.
-    hush: listen::Hush,
-    /// What the listening thread has noticed. Absent if it could not start,
-    /// which costs the microphone and nothing else - typing still works.
-    heard: Option<UnboundedReceiver<listen::Voiced>>,
-    /// The key is down and the Commander is talking.
-    listening: bool,
-    /// Whether this turn has put anything on screen yet.
-    showed_something: bool,
+    /// The engine's end of the conversation. Everything Ward knows is read
+    /// through this, and everything the Commander does is sent through it.
+    engine: engine::Handle,
+    /// Whether a key has been stored, which is all the settings page needs to
+    /// know about it. The key itself never comes back out.
+    key_stored: bool,
     /// Where the window is, in the units the window system uses.
     placement: Option<egui::Pos2>,
     /// A new checklist item being typed. Held here rather than in the panel so
     /// a half-typed line survives the frame it was typed on.
     adding: String,
+    /// What is being typed to Ward. The engine holds the conversation; this is
+    /// only the box it is typed into.
+    prompt: String,
     /// The settings page, and whether it is what the window is showing.
     page: page::Page,
     settings_open: bool,
     /// Answers to things the settings page asked for, which all take long
-    /// enough that asking on the drawing thread would stop the window.
+    /// enough that asking on the drawing thread would stop the window. These
+    /// stay here rather than going to the engine because they serve the
+    /// settings page and nothing else, and the settings page only exists while
+    /// somebody is looking at it.
     errands: UnboundedReceiver<Errand>,
     errand: UnboundedSender<Errand>,
     window: egui::Vec2,
@@ -442,6 +406,8 @@ impl Ward {
             }
         };
 
+        let key_stored = client.is_some();
+
         // Started before anything else needs it, because the slow parts happen
         // once and on that thread: half a gigabyte of speech model to load and
         // a capture device to open. By the time a key can be held, there is
@@ -452,10 +418,10 @@ impl Ward {
             settings.file("speech model", &config::data_dir()),
             std::path::PathBuf::from(settings.string("bindings folder")),
             hush.clone(),
+            // Nothing waits on this. It asks the window to draw what the engine
+            // has already been told, and the engine carries on whether or not
+            // there is a window to ask.
             {
-                // The window is not otherwise repainting while Elite has focus,
-                // so what the microphone hears would sit in the channel until
-                // somebody moved the mouse.
                 let ctx = ctx.clone();
                 move || ctx.request_repaint()
             },
@@ -468,32 +434,37 @@ impl Ward {
         let captions = std::sync::Arc::new(std::sync::Mutex::new(captions::Captions::default()));
         overlay::spawn(captions.clone());
 
+        let wake: engine::Wake = {
+            let ctx = ctx.clone();
+            Arc::new(move || ctx.request_repaint())
+        };
+
+        let engine = {
+            // The engine spawns onto this runtime, so it has to be started from
+            // inside it. The guard is dropped before the runtime is moved into
+            // the struct below.
+            let _inside = runtime.enter();
+
+            engine::Engine::start(
+                settings.clone(),
+                registry,
+                client,
+                heard,
+                captions,
+                hush,
+                wake,
+            )
+        };
+
         Self {
             settings,
-            registry,
             state,
             runtime,
             screen,
-            client,
-            history: Vec::new(),
-            prompt: String::new(),
-            pending: None,
-            events: None,
-            problem: None,
-            using: None,
-            watcher: None,
-            situation: journal::Situation::default(),
-            last_looked: std::time::Duration::ZERO,
-            speech: Arbiter::default(),
-            spoke_at: std::time::Duration::ZERO,
-            spoken: None,
-            playing: voice::Playing::default(),
-            captions,
-            hush,
-            heard,
-            listening: false,
-            showed_something: false,
+            engine,
+            key_stored,
             adding: String::new(),
+            prompt: String::new(),
             placement: None,
             page: page::Page::default(),
             settings_open: false,
@@ -503,313 +474,18 @@ impl Ward {
         }
     }
 
-    fn streaming(&self) -> bool {
-        self.events.is_some()
-    }
-
-    fn send(&mut self, ctx: &egui::Context) {
-        let text = self.prompt.trim().to_string();
-
-        if text.is_empty() || self.streaming() {
-            return;
-        }
-
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-
-        self.prompt.clear();
-        self.problem = None;
-        self.history.push(Message {
-            role: Role::User,
-            text,
-        });
-        self.pending = Some(String::new());
-        self.showed_something = false;
-
-        let (tx, rx): (UnboundedSender<Event>, UnboundedReceiver<Event>) = unbounded_channel();
-        self.events = Some(rx);
-
-        tracing::info!(target: "ward::turn", messages = self.history.len(), "turn started");
-
-        let history = self.history.clone();
-        let ctx = ctx.clone();
-
-        let situation = self.situation.brief();
-
-        self.runtime.spawn(async move {
-            client.stream(&history, situation, tx).await;
-            // The window is not otherwise waiting on anything, so nudge it or
-            // the last fragment sits in the channel until the mouse moves.
-            ctx.request_repaint();
-        });
-    }
-
-    /// Reads whatever the game has written since last time.
-    ///
-    /// Polled rather than watched, and not on every frame: the journal changes
-    /// a few times a minute at most, and reading a file sixty times a second to
-    /// find nothing is work nobody asked for.
-    fn read_journal(&mut self, now: std::time::Duration) {
-        if now.saturating_sub(self.last_looked) < std::time::Duration::from_millis(900) {
-            return;
-        }
-        self.last_looked = now;
-
-        let folder = std::path::PathBuf::from(self.settings.string("journal folder"));
-
-        // The game starts a new file every session, so the newest one is
-        // re-checked rather than chosen once at startup. Without this, Ward
-        // stops learning anything the moment the Commander restarts the game.
-        if let Some(newest) = journal::newest(&folder) {
-            let changed = self
-                .watcher
-                .as_ref()
-                .map(|w| w.path() != newest)
-                .unwrap_or(true);
-
-            if changed {
-                tracing::info!(
-                    target: "ward::journal",
-                    file = %newest.file_name().unwrap_or_default().to_string_lossy(),
-                    "following"
-                );
-                self.watcher = Some(journal::Watcher::new(newest));
-            }
-        }
-
-        let Some(watcher) = self.watcher.as_mut() else {
-            return;
-        };
-
-        let read = watcher.poll();
-
-        // The session so far builds state without being announced. Only what
-        // happened since Ward started looking is news.
-        for record in read.backlog.iter().chain(read.fresh.iter()) {
-            self.situation.absorb(record);
-        }
-
-        if !read.backlog.is_empty() {
-            tracing::info!(
-                target: "ward::journal",
-                events = read.backlog.len(),
-                "caught up on the session so far"
-            );
-        }
-
-        for record in &read.fresh {
-            // The game's own time for the event, not Ward's. Lining an event up
-            // against when the game says it happened is the whole point of
-            // reading the timestamp rather than stamping it on arrival.
-            tracing::debug!(
-                target: "ward::journal",
-                event = %record.event,
-                at = record.timestamp.map(|t| t.to_string()).unwrap_or_default(),
-                "observed"
-            );
-
-            // Only what happened since Ward started looking. Replaying the
-            // backlog through here would fire the scanner for every arrival of
-            // the session at once, every time Ward starts.
-            self.registry.on_event(record);
-        }
-    }
-
-    /// Speaks an act, if it has words and a voice can be had.
-    ///
-    /// Failure here costs the voice and nothing else. The answer is already on
-    /// screen, the caption still advances on its own timing, and the reason is
-    /// written down. A companion that goes quiet is worse than one that never
-    /// spoke, but a companion that stops working because it could not speak is
-    /// worse than both.
-    fn say(&mut self, act: &Act, ctx: &egui::Context) {
-        let Body::Text(text) = &act.body else {
-            return;
-        };
-
-        let text = text.clone();
-        let voice = self.settings.string("voice");
-        let rate = self.settings.string("speaking rate");
-        let ctx = ctx.clone();
-        let playing = self.playing.clone();
-        let hush = self.hush.clone();
-        let captions = self.captions.clone();
-        let speaker = match act.speaker {
-            Speaker::Ward => None,
-            Speaker::System => Some("Ward"),
-        };
-
-        let (tx, rx) = unbounded_channel();
-        self.spoken = Some(rx);
-
-        self.runtime.spawn(async move {
-            let started = std::time::Instant::now();
-
-            // Spoken in pieces, and the first piece is short.
-            //
-            // Synthesizing the whole reply before playing any of it cost a
-            // median of six seconds of silence with the answer already on
-            // screen, and fifteen on a long one - measured, not guessed. The
-            // service produces audio faster than it plays, so the opening
-            // sentence was ready almost immediately every time and then waited
-            // for the rest of the paragraph to be made.
-            //
-            // Each piece is fetched while the one before it is playing, so
-            // after the first the queue stays ahead of the voice and the seams
-            // fall at sentence ends where a speaker pauses anyway.
-            let pieces = voice::into_pieces(&text);
-
-            playing.begin();
-            hush.speaking();
-
-            let mut first_audio: Option<u64> = None;
-
-            // One piece is fetched while the one before it is playing, which
-            // is what makes the seams silent. Written as a loop that fetched
-            // and then played, the wait for the next piece fell into the gap
-            // between two sentences and was plainly audible - a pause the
-            // length of a network round trip in the middle of a reply.
-            //
-            // A channel of one is the whole mechanism: the fetcher runs a piece
-            // ahead and then waits, so at most one extra piece is ever bought
-            // and paid for before an interruption throws it away.
-            let (ready, mut waiting) = tokio::sync::mpsc::channel::<(String, voice::Speech)>(1);
-
-            {
-                let playing = playing.clone();
-                let pieces = pieces.clone();
-
-                tokio::spawn(async move {
-                    for piece in pieces {
-                        if playing.cut_off() {
-                            break;
-                        }
-
-                        // Bounded, because it was not. A websocket that
-                        // connects and then says nothing left this task waiting
-                        // forever, and the stream above waits for this task to
-                        // report - so one stalled connection silenced Ward for
-                        // the rest of the session while the answers kept
-                        // arriving on screen.
-                        let attempt = tokio::time::timeout(
-                            PATIENCE,
-                            voice::synthesize(&piece, &voice, &rate),
-                        )
-                        .await;
-
-                        let spoke = match attempt {
-                            Ok(spoke) => spoke,
-                            Err(_) => {
-                                tracing::warn!(
-                                    target: "ward::voice",
-                                    seconds = PATIENCE.as_secs(),
-                                    "the voice service stopped answering"
-                                );
-                                break;
-                            }
-                        };
-
-                        match spoke {
-                            // The receiver is gone, which means playback stopped
-                            // and nothing is waiting for this.
-                            Ok(speech) => {
-                                if ready.send((piece, speech)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(target: "ward::voice", error = %e, "could not speak");
-                                break;
-                            }
-                        }
-                    }
-                });
-            }
-
-            let mut spoken = 0usize;
-
-            while let Some((piece, speech)) = waiting.recv().await {
-                if playing.cut_off() {
-                    tracing::info!(target: "ward::voice", spoken, of = pieces.len(), "cut off");
-                    break;
-                }
-
-                // The captions for this piece, told how long the voice will take
-                // over it. Handed over here rather than from the window, because
-                // the window is not painted while Ward is minimized - which in a
-                // headset is most of the time, and a caption clock that stops
-                // there is one that leaves a caption on screen forever.
-                if let Ok(mut captions) = captions.lock() {
-                    captions.speaking(&piece, speaker, speech.duration(), diag::since_start());
-                }
-
-                if first_audio.is_none() {
-                    let ms = started.elapsed().as_millis() as u64;
-                    first_audio = Some(ms);
-                    tracing::info!(
-                        target: "ward::voice",
-                        ms,
-                        pieces = pieces.len(),
-                        chars = piece.chars().count(),
-                        "first audio ready"
-                    );
-                }
-
-                // Playback blocks for as long as the words take, so it goes
-                // somewhere that is allowed to block.
-                let playing = playing.clone();
-                let played =
-                    tokio::task::spawn_blocking(move || voice::play(speech.audio, &playing)).await;
-
-                spoken += 1;
-
-                if let Ok(Err(e)) = played {
-                    tracing::warn!(target: "ward::voice", error = %e, "could not play");
-                    break;
-                }
-            }
-
-            // Unconditional, and before anything else. A hush left in place is
-            // a microphone that never comes back, and the symptom is a
-            // Commander holding the key and being ignored for the rest of the
-            // session.
-            hush.stopped(diag::since_start());
-
-            if let Ok(mut captions) = captions.lock() {
-                captions.finished(diag::since_start());
-            }
-
-            tracing::info!(
-                target: "ward::voice",
-                ms = started.elapsed().as_millis() as u64,
-                to_first_audio = first_audio.unwrap_or_default(),
-                "finished speaking"
-            );
-
-            let _ = tx.send(());
-            ctx.request_repaint();
-        });
-    }
-
-    /// Carries out what the settings page asked for.
+    /// Hands what the settings page asked for to whoever owns it.
     ///
     /// **Everything here takes effect now.** A setting that needs a restart is
     /// a setting somebody changes, hears no difference from, and changes back —
-    /// and in a headset a restart means taking it off. Rebuilding the registry
-    /// and the client is cheaper than teaching every piece of Ward to notice a
-    /// setting moving underneath it, and it means one path applies all of them
-    /// rather than one path per setting that somebody has to remember to add.
+    /// and in a headset a restart means taking it off.
     fn apply(&mut self, wants: page::Wants, ctx: &egui::Context) {
         if let Some(key) = wants.store_key {
             match secrets::store(&secrets::key_path(&config::data_dir()), &key) {
                 Ok(()) => {
                     tracing::info!(target: "ward::secrets", "key stored");
-                    self.client = Some(Client::new(
-                        key,
-                        self.settings.string("model"),
-                        self.registry.clone(),
-                    ));
+                    self.engine.tell(Intent::Key(key));
+                    self.key_stored = true;
                     self.screen = Screen::Talking;
                     self.page.key_stored();
                     // A new key means a different list of models, and the old
@@ -824,60 +500,15 @@ impl Ward {
         }
 
         if wants.changed {
-            if let Err(e) = self.settings.save(&Settings::path(&config::data_dir())) {
-                tracing::warn!(target: "ward::config", error = %e, "could not save settings");
-                self.problem = Some(format!("That change did not save: {e}"));
-            }
-
+            // Applied here because it is the window's own scaling, and sent on
+            // because everything else built from settings lives in the engine.
             ctx.set_zoom_factor(self.settings.f32("text size", 0.5, 4.0));
-
-            // Rebuilt rather than nudged. A capability reads its settings when
-            // it is made, so the honest way to change one is to make it again.
-            // Not while a turn is in flight, because a tool is running against
-            // the registry that exists now.
-            if !self.streaming() {
-                self.registry =
-                    Arc::new(capabilities::registry(&self.settings, &config::data_dir()));
-
-                if let Some(client) = self.client.as_ref() {
-                    self.client =
-                        Some(client.with(self.settings.string("model"), self.registry.clone()));
-                }
-
-                tracing::info!(
-                    target: "ward::config",
-                    changed = self.settings.changed(),
-                    "settings applied"
-                );
-            }
+            self.engine
+                .tell(Intent::Settings(Box::new(self.settings.clone())));
         }
 
         if let Some(text) = wants.preview {
-            // Straight to the voice rather than onto the speech stream. This is
-            // the Commander auditioning a voice, not Ward saying something, and
-            // it must not queue behind a reply or land in the transcript.
-            let voice = self.settings.string("voice");
-            let rate = self.settings.string("speaking rate");
-            let playing = self.playing.clone();
-            let hush = self.hush.clone();
-
-            playing.stop();
-
-            self.runtime.spawn(async move {
-                match voice::synthesize(&text, &voice, &rate).await {
-                    Ok(speech) => {
-                        hush.speaking();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            voice::play(speech.audio, &playing)
-                        })
-                        .await;
-                        hush.stopped(diag::since_start());
-                    }
-                    Err(e) => {
-                        tracing::warn!(target: "ward::voice", error = %e, "could not preview");
-                    }
-                }
-            });
+            self.engine.tell(Intent::Preview(text));
         }
 
         if wants.fetch_voices {
@@ -953,161 +584,6 @@ impl Ward {
         }
     }
 
-    /// Takes whatever the listening thread has noticed since the last frame.
-    fn pump_voice(&mut self, ctx: &egui::Context) {
-        let Some(rx) = self.heard.as_mut() else {
-            return;
-        };
-
-        let mut said: Option<String> = None;
-        let mut gone = false;
-
-        while let Ok(voiced) = rx.try_recv() {
-            match voiced {
-                listen::Voiced::Listening => {
-                    self.listening = true;
-                    // Barge-in. The Commander pressing the key is the whole of
-                    // the decision - Ward stops talking and does not carry on
-                    // where it left off afterwards.
-                    self.playing.stop();
-                    self.speech.quiet();
-                    self.problem = None;
-                }
-                listen::Voiced::Quiet => {
-                    self.listening = false;
-                }
-                listen::Voiced::Words(text) => {
-                    self.listening = false;
-                    said = Some(text);
-                }
-                listen::Voiced::Clash { key, actions } => {
-                    self.problem = Some(format!(
-                        "{key} is your push-to-talk key and is also bound in Elite to \
-                         {}. Holding it to talk will do that too - change one of them.",
-                        actions.join(", ")
-                    ));
-                }
-                listen::Voiced::Deaf(why) => {
-                    tracing::warn!(target: "ward::listen", reason = %why, "not listening");
-                    self.problem = Some(format!("Ward cannot hear you. {why}"));
-                    gone = true;
-                }
-            }
-        }
-
-        if gone {
-            self.heard = None;
-        }
-
-        let Some(text) = said else {
-            return;
-        };
-
-        tracing::info!(target: "ward::listen", chars = text.len(), "heard");
-
-        self.prompt = text;
-
-        // A reply already arriving owns the turn. Rather than lose what was
-        // said, it is left in the box where the Commander can see it and send
-        // it themselves - which is the one place the typed path earns its keep
-        // twice.
-        if self.streaming() {
-            tracing::info!(target: "ward::listen", "a turn was already running");
-            return;
-        }
-
-        self.send(ctx);
-    }
-
-    /// Drains whatever the turn has produced since the last frame.
-    fn pump(&mut self) {
-        let Some(rx) = self.events.as_mut() else {
-            return;
-        };
-
-        let mut finished = false;
-
-        while let Ok(event) = rx.try_recv() {
-            // The moment anything appears, which is where the Commander starts
-            // counting. The reply streams in, so this is the first token rather
-            // than the last one - measuring from the end of the reply told a
-            // flattering story about a wait that begins here.
-            if matches!(event, Event::Text(_) | Event::Using(_)) && !self.showed_something {
-                self.showed_something = true;
-                tracing::info!(target: "ward::turn", "first text on screen");
-            }
-
-            match event {
-                Event::Text(chunk) => {
-                    self.using = None;
-                    if let Some(pending) = self.pending.as_mut() {
-                        pending.push_str(&chunk);
-                    }
-                }
-                Event::Using(tool) => {
-                    self.using = Some(tool);
-                }
-                Event::Done { stop_reason } => {
-                    let text = self.pending.take().unwrap_or_default();
-
-                    // A refusal arrives as an ordinary success with little or
-                    // no content. Left alone it would render as Ward simply
-                    // saying nothing, which reads as a bug.
-                    if stop_reason.as_deref() == Some("refusal") && text.trim().is_empty() {
-                        self.problem = Some("Ward declined to answer that.".to_string());
-                    } else if text.trim().is_empty() {
-                        self.problem = Some("The reply came back empty.".to_string());
-                    } else {
-                        tracing::info!(
-                            target: "ward::turn",
-                            chars = text.len(),
-                            stop_reason = stop_reason.as_deref().unwrap_or("none"),
-                            "turn finished"
-                        );
-
-                        let now = diag::since_start();
-                        self.speech.offer(
-                            Act::text(Speaker::Ward, Register::Reply, text.clone(), now),
-                            now,
-                        );
-
-                        self.history.push(Message {
-                            role: Role::Assistant,
-                            text,
-                        });
-                    }
-
-                    self.using = None;
-                    finished = true;
-                }
-                Event::Failed(message) => {
-                    tracing::warn!(target: "ward::turn", error = %message, "turn failed");
-
-                    let now = diag::since_start();
-                    self.speech.offer(
-                        Act::text(Speaker::System, Register::Alert, message.clone(), now)
-                            .about("turn failure"),
-                        now,
-                    );
-
-                    self.problem = Some(message);
-                    // Drop the partial reply. Keeping it would leave a fragment
-                    // on screen that looks like an answer and is not one.
-                    self.pending = None;
-                    self.using = None;
-                    // Take the question back out of the history too, so a retry
-                    // does not send it twice.
-                    self.history.pop();
-                    finished = true;
-                }
-            }
-        }
-
-        if finished {
-            self.events = None;
-        }
-    }
-
     fn key_screen(&mut self, ui: &mut egui::Ui) {
         // Pulled out so the borrow of `self.screen` ends before anything else
         // on `self` is touched.
@@ -1149,11 +625,8 @@ impl Ward {
             match secrets::store(&secrets::key_path(&config::data_dir()), &key) {
                 Ok(()) => {
                     tracing::info!(target: "ward::secrets", "key stored");
-                    self.client = Some(Client::new(
-                        key,
-                        self.settings.string("model"),
-                        self.registry.clone(),
-                    ));
+                    self.engine.tell(Intent::Key(key));
+                    self.key_stored = true;
                     self.screen = Screen::Talking;
                     return;
                 }
@@ -1167,14 +640,13 @@ impl Ward {
         self.screen = Screen::NeedKey { entry, problem };
     }
 
-    fn compose(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let busy = self.streaming();
+    fn compose(&mut self, ui: &mut egui::Ui, view: &engine::View) {
+        let busy = view.streaming;
 
         ui.horizontal(|ui| {
             let send = ui.add_enabled(!busy, egui::Button::new("Send"));
 
-            let hint = match (busy, self.listening) {
+            let hint = match (busy, view.listening) {
                 // Listening wins: it is the state the Commander is currently
                 // holding a key to be in, and it is the one they are waiting
                 // for confirmation of.
@@ -1192,8 +664,9 @@ impl Ward {
 
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
-            if send.clicked() || entered {
-                self.send(&ctx);
+            if (send.clicked() || entered) && !self.prompt.trim().is_empty() {
+                self.engine
+                    .tell(Intent::Ask(std::mem::take(&mut self.prompt)));
                 // Keep focus in the box so a second question does not need the
                 // mouse.
                 field.request_focus();
@@ -1201,30 +674,19 @@ impl Ward {
         });
     }
 
-    /// Draws whatever the capabilities currently have to show.
-    ///
-    /// Read fresh every frame rather than remembered, which is what keeps this
-    /// from going stale when something changes it by voice.
+    /// Draws whatever the capabilities currently had to show when the engine
+    /// last published.
     ///
     /// Every edit here goes through the same tool the model calls, with the
     /// same words. The panel cannot make a change the model could not, and it
     /// cannot make one in a way the checklist's own rules would refuse.
-    fn panel(&mut self, ui: &mut egui::Ui) {
-        // Collected first so the borrow of the registry ends before anything
-        // below runs a tool against it.
-        let displays: Vec<shown::Shown> = self
-            .registry
-            .capabilities()
-            .iter()
-            .filter_map(|c| c.display())
-            .collect();
-
-        // What the Commander asked for, decided while drawing and carried out
-        // after. Running a tool mid-draw would mean the rest of the frame
-        // renders a list that has already changed underneath it.
+    fn panel(&mut self, ui: &mut egui::Ui, view: &engine::View) {
+        // What the Commander asked for, decided while drawing and sent after.
+        // Running a tool mid-draw would mean the rest of the frame renders a
+        // list that has already changed underneath it.
         let mut edit: Option<(&'static str, String)> = None;
 
-        for display in displays {
+        for display in &view.panels {
             let title = display.title().unwrap_or_default().to_string();
 
             let shown::Shown::List { rows, .. } = display else {
@@ -1241,7 +703,7 @@ impl Ward {
                 ui.weak("Nothing on it yet.");
             }
 
-            for row in &rows {
+            for row in rows {
                 // Top aligned, because a wrapped item is taller than the tick
                 // box beside it and a centered box floats in the middle of a
                 // two-line item.
@@ -1311,22 +773,21 @@ impl Ward {
         }
 
         if let Some((tool, item)) = edit {
-            let answer = self.registry.run(tool, &json!({ "item": item }));
-            tracing::info!(target: "ward::checklist", from = "panel", tool, %answer, "edited");
+            self.engine.tell(Intent::Tool(tool, item));
         }
     }
 
-    fn transcript(&mut self, ui: &mut egui::Ui) {
+    fn transcript(&mut self, ui: &mut egui::Ui, view: &engine::View) {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                if self.history.is_empty() && self.pending.is_none() {
+                if view.history.is_empty() && view.pending.is_none() {
                     ui.add_space(24.0);
                     ui.label("Ask Ward something to begin.");
                 }
 
-                for message in &self.history {
+                for message in &view.history {
                     let who = match message.role {
                         Role::User => "Commander",
                         Role::Assistant => "Ward",
@@ -1337,22 +798,22 @@ impl Ward {
                     ui.label(&message.text);
                 }
 
-                if let Some(pending) = self.pending.as_ref() {
+                if let Some(pending) = view.pending.as_ref() {
                     ui.add_space(10.0);
                     ui.label(egui::RichText::new("Ward").strong());
 
-                    if let Some(tool) = self.using.as_ref() {
+                    if let Some(tool) = view.using.as_ref() {
                         ui.weak(format!("using {tool}…"));
                     }
 
                     if !pending.is_empty() {
                         ui.label(pending);
-                    } else if self.using.is_none() {
+                    } else if view.using.is_none() {
                         ui.label("…");
                     }
                 }
 
-                if let Some(problem) = self.problem.as_ref() {
+                if let Some(problem) = view.problem.as_ref() {
                     ui.add_space(10.0);
                     ui.colored_label(ui.visuals().error_fg_color, problem);
                 }
@@ -1385,12 +846,14 @@ impl eframe::App for Ward {
             tracing::warn!(target: "ward::act", keys = holding, "released keys on the way out");
         }
 
-        self.state.set("window width", json!(self.window.x));
-        self.state.set("window height", json!(self.window.y));
+        self.state
+            .set("window width", serde_json::json!(self.window.x));
+        self.state
+            .set("window height", serde_json::json!(self.window.y));
 
         if let Some(corner) = self.placement {
-            self.state.set("window x", json!(corner.x));
-            self.state.set("window y", json!(corner.y));
+            self.state.set("window x", serde_json::json!(corner.x));
+            self.state.set("window y", serde_json::json!(corner.y));
         }
 
         if let Err(e) = self.state.save(&State::path(&config::data_dir())) {
@@ -1421,47 +884,10 @@ impl eframe::App for Ward {
             self.placement = Some(corner.to_pos2());
         }
 
-        self.pump();
-        self.pump_voice(&ui.ctx().clone());
-
-        let now = diag::since_start();
-        self.read_journal(now);
-
-        // Speaking finished, so the stream may move on.
-        if self.spoken.as_mut().is_some_and(|rx| rx.try_recv().is_ok()) {
-            self.spoken = None;
-
-            self.speech.finished();
-        }
-
-        match self.speech.speaking() {
-            // The caption's own timing is the backstop. If a voice is speaking
-            // it will say so first; if synthesis failed, this is what stops the
-            // caption sitting there forever.
-            Some(act)
-                if self.spoken.is_none() && now.saturating_sub(self.spoke_at) >= act.dwell() =>
-            {
-                self.speech.finished();
-            }
-            Some(_) => {}
-            None => {
-                if let Some(act) = self.speech.next(now) {
-                    self.spoke_at = now;
-                    self.say(&act, ui.ctx());
-                }
-            }
-        }
-        if self.speech.speaking().is_some() {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(200));
-        }
-
-        if self.streaming() {
-            // Tokens arrive between frames; ask for the next one rather than
-            // waiting for input that may never come.
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(33));
-        }
+        // One picture for the whole frame. Read again halfway down and the top
+        // of the window could be drawn from one turn and the bottom from the
+        // next.
+        let view = self.engine.view();
 
         self.pump_errands();
 
@@ -1501,7 +927,7 @@ impl eframe::App for Ward {
 
         if self.settings_open && !need_key {
             egui::CentralPanel::default().show(ui, |ui| {
-                let stored = self.client.is_some();
+                let stored = self.key_stored;
                 let mut settings = self.settings.clone();
                 let wants = self.page.show(ui, &mut settings, stored);
                 self.settings = settings;
@@ -1524,7 +950,7 @@ impl eframe::App for Ward {
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
-                        .show(ui, |ui| self.panel(ui));
+                        .show(ui, |ui| self.panel(ui, &view));
                 });
         }
 
@@ -1537,11 +963,11 @@ impl eframe::App for Ward {
             // Compose is laid out first so it pins to the bottom; the
             // transcript then takes whatever height is left.
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                self.compose(ui);
+                self.compose(ui, &view);
                 ui.separator();
 
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    self.transcript(ui);
+                    self.transcript(ui, &view);
                 });
             });
         });

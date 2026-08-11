@@ -54,3 +54,5 @@ main.rs          exempt  is the window
 overlay.rs       exempt  needs a headset, or at least a Vulkan device
 render.rs        exempt  needs a graphics device
 vr.rs            exempt  needs SteamVR running
+
+update.rs        integration

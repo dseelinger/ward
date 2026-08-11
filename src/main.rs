@@ -40,6 +40,7 @@ mod shown;
 mod speech;
 mod sse;
 mod transcribe;
+mod update;
 mod voice;
 mod vr;
 
@@ -585,6 +586,40 @@ impl Ward {
         }
     }
 
+    /// Says that a newer Ward exists, and takes the answer.
+    ///
+    /// Nothing is downloaded until the Commander says so, and nothing is
+    /// installed until Ward is closing. Both halves matter: fetching and running
+    /// a binary on somebody's behalf is a decision they did not make, and an
+    /// installer window appearing over the game is one they cannot get to in a
+    /// headset.
+    fn update_notice(&mut self, ui: &mut egui::Ui, update: &engine::Update) {
+        match update {
+            engine::Update::Nothing => {}
+            engine::Update::Newer(version) => {
+                if ui
+                    .button(format!("Ward {version} is out — get it"))
+                    .on_hover_text(
+                        "Downloads it and checks it against the checksum published \
+                         with the release. It installs when you close Ward.",
+                    )
+                    .clicked()
+                {
+                    self.engine.tell(Intent::Update);
+                }
+            }
+            engine::Update::Fetching(version) => {
+                ui.weak(format!("Fetching Ward {version}…"));
+            }
+            engine::Update::Ready { version, .. } => {
+                ui.weak(format!("Ward {version} installs when you close this."));
+            }
+            engine::Update::Failed(why) => {
+                ui.colored_label(ui.visuals().error_fg_color, format!("Update failed: {why}"));
+            }
+        }
+    }
+
     fn key_screen(&mut self, ui: &mut egui::Ui) {
         // Pulled out so the borrow of `self.screen` ends before anything else
         // on `self` is touched.
@@ -860,6 +895,24 @@ impl eframe::App for Ward {
         if let Err(e) = self.state.save(&State::path(&config::data_dir())) {
             tracing::warn!(target: "ward::config", error = %e, "could not remember the window");
         }
+
+        // Last, and only if the Commander already said yes and the download
+        // already proved to be the file the release published. Here rather than
+        // when it arrived, because an installer window over a running game is
+        // worse than the update waiting — and in a headset it is a window
+        // nobody can reach.
+        //
+        // Failing here costs the update and nothing else. Ward is closing.
+        if let engine::Update::Ready { version, installer } = &self.engine.view().update {
+            match update::install(installer) {
+                Ok(()) => {
+                    tracing::info!(target: "ward::update", %version, "installing on the way out")
+                }
+                Err(e) => {
+                    tracing::warn!(target: "ward::update", error = %e, "could not start the installer")
+                }
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -921,6 +974,14 @@ impl eframe::App for Ward {
                     if self.settings.changed() > 0 {
                         ui.weak(format!("{} changed", self.settings.changed()));
                     }
+
+                    // Pushed to the right so it never moves the two tabs
+                    // around, and absent entirely when there is nothing to say.
+                    // An update notice is news the first time and furniture
+                    // every time after.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.update_notice(ui, &view.update);
+                    });
                 });
                 ui.add_space(4.0);
             });

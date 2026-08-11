@@ -209,6 +209,7 @@ pub fn all() -> Vec<&'static Row> {
         .iter()
         .chain(crate::honk::SETTINGS)
         .chain(crate::checklist::SETTINGS)
+        .chain(crate::update::SETTINGS)
         .collect()
 }
 

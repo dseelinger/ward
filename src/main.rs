@@ -127,9 +127,31 @@ fn main() -> eframe::Result<()> {
         state.f32("window height").unwrap_or(720.0),
     ];
 
+    // Where it was last time, if it is anywhere believable.
+    //
+    // A remembered position can outlive the screen it was on - a monitor
+    // unplugged, a laptop away from its dock - and a window restored onto a
+    // screen that is no longer there is one nobody can reach. The bound below
+    // catches nonsense rather than that case, because a second monitor to the
+    // left is a legitimate negative coordinate and refusing it would break a
+    // setup that works. If a window ever does come back somewhere unreachable,
+    // deleting data/state.json puts it back in the middle of the screen, which
+    // is the whole reason running state is a file you can throw away.
+    let believable = |value: f32| value.abs() < 32_000.0;
+
+    let placement = state
+        .f32("window x")
+        .zip(state.f32("window y"))
+        .filter(|(x, y)| believable(*x) && believable(*y));
+
+    let mut viewport = egui::ViewportBuilder::default().with_inner_size(size);
+
+    if let Some((x, y)) = placement {
+        viewport = viewport.with_position([x, y]);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size(size)
+        viewport: viewport
             // Two surfaces side by side need room for both. Below this the
             // checklist takes so much of the width that the conversation is a
             // strip, which is a window that is technically usable and actually
@@ -338,6 +360,8 @@ struct Ward {
     heard: Option<UnboundedReceiver<listen::Voiced>>,
     /// The key is down and the Commander is talking.
     listening: bool,
+    /// Where the window is, in the units the window system uses.
+    placement: Option<egui::Pos2>,
     /// A new checklist item being typed. Held here rather than in the panel so
     /// a half-typed line survives the frame it was typed on.
     adding: String,
@@ -459,6 +483,7 @@ impl Ward {
             heard,
             listening: false,
             adding: String::new(),
+            placement: None,
             page: page::Page::default(),
             settings_open: false,
             errands: errand_rx,
@@ -1094,7 +1119,10 @@ impl Ward {
             }
 
             for row in &rows {
-                ui.horizontal(|ui| {
+                // Top aligned, because a wrapped item is taller than the tick
+                // box beside it and a centered box floats in the middle of a
+                // two-line item.
+                ui.horizontal_top(|ui| {
                     let mut done = row.done;
 
                     // Only ever forward. Unticking is a different question from
@@ -1113,14 +1141,18 @@ impl Ward {
                         true => egui::RichText::new(&row.text).weak().strikethrough(),
                         false => egui::RichText::new(&row.text),
                     };
-                    ui.label(label);
 
-                    // Pushed to the far edge, and a word rather than a symbol.
-                    // Next to the tick box it was a second small square, and a
-                    // small square beside a tick box reads as another tick box
-                    // - so the control that destroys something looked like the
-                    // control that completes it.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // The button is placed first and the text fills what is
+                    // left, wrapping onto as many lines as it needs.
+                    //
+                    // Laid out the other way round, a long item made the row
+                    // wider than the panel instead of taller: the text ran off
+                    // the edge, the button went with it, and the heading was
+                    // pushed out of view on the other side. Commanders write
+                    // items like "go back to Tod McQuin and engineer the
+                    // remaining multicannons", so this is the normal case
+                    // rather than the extreme one.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                         if ui
                             .small_button("Remove")
                             .on_hover_text("Take this off the list entirely")
@@ -1128,6 +1160,15 @@ impl Ward {
                         {
                             edit = Some(("checklist_remove", row.text.clone()));
                         }
+
+                        // Turned back around before the text goes in. The outer
+                        // layout exists to park the button on the right; laying
+                        // the words out in it too would set them against the
+                        // right edge, which for a wrapped item reads as a
+                        // ragged left margin that moves line to line.
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                            ui.add(egui::Label::new(label).wrap());
+                        });
                     });
                 });
             }
@@ -1224,6 +1265,11 @@ impl eframe::App for Ward {
         self.state.set("window width", json!(self.window.x));
         self.state.set("window height", json!(self.window.y));
 
+        if let Some(corner) = self.placement {
+            self.state.set("window x", json!(corner.x));
+            self.state.set("window y", json!(corner.y));
+        }
+
         if let Err(e) = self.state.save(&State::path(&config::data_dir())) {
             tracing::warn!(target: "ward::config", error = %e, "could not remember the window");
         }
@@ -1237,8 +1283,19 @@ impl eframe::App for Ward {
         //
         // Converted on the way out, because the two ends of this count in
         // different units. See [`as_the_window_system_counts_it`].
+        let zoom = ui.ctx().zoom_factor();
+
         if let Some(rect) = ui.ctx().input(|i| i.viewport().inner_rect) {
-            self.window = as_the_window_system_counts_it(rect.size(), ui.ctx().zoom_factor());
+            self.window = as_the_window_system_counts_it(rect.size(), zoom);
+        }
+
+        // The outer rect, because that is what the window system is handed back:
+        // it includes the title bar, and remembering where the drawing started
+        // instead would walk the window up the screen by the height of its own
+        // decoration on every launch.
+        if let Some(rect) = ui.ctx().input(|i| i.viewport().outer_rect) {
+            let corner = as_the_window_system_counts_it(rect.min.to_vec2(), zoom);
+            self.placement = Some(corner.to_pos2());
         }
 
         self.pump();

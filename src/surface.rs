@@ -196,15 +196,12 @@ fn big(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<Intent>)
                 local.settings_open = true;
             }
 
-            // What the number counts, in the words a Commander would use. "3 changed" on its own
-            // is a number with no noun: it reads as three of something unspecified having gone
-            // wrong, when it means three settings differ from what Ward ships.
-            if view.settings.changed() > 0 {
-                ui.weak(format!("{} settings changed from default", view.settings.changed()))
-                    .on_hover_text(
-                        "Ward writes down only what you change. Everything else follows the                          default, and empties back to it.",
-                    );
-            }
+            // No count of changed settings here. It said "3 changed", which is a number with no
+            // noun and, worse, a tense nobody chose: a setting picked months ago is not a change,
+            // and a bar that reports one every session reads as an unread notification about
+            // something the Commander already decided. The settings page itself already shows
+            // which rows are overridden, next to the button that puts each one back — which is
+            // where that belongs, because there it is actionable rather than nagging.
 
             // Pushed to the right so it never moves the two tabs around, and
             // absent entirely when there is nothing to say. An update notice is

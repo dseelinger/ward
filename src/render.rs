@@ -84,6 +84,8 @@ pub struct Renderer {
     was_pressed: bool,
     /// Scrolling that arrived since the last frame, waiting to be delivered.
     scrolled: egui::Vec2,
+    /// What was typed since the last frame, already in the toolkit's terms.
+    typing: Vec<egui::Event>,
 }
 
 impl Renderer {
@@ -154,6 +156,7 @@ impl Renderer {
             pressed: false,
             was_pressed: false,
             scrolled: egui::Vec2::ZERO,
+            typing: Vec::new(),
         })
     }
 
@@ -267,6 +270,46 @@ impl Renderer {
         self.pressed = down;
     }
 
+    /// Takes what SteamVR's keyboard reported, and puts it in whatever has focus.
+    ///
+    /// Characters rather than key presses, because that is what the keyboard sends and what a
+    /// text field wants. The two exceptions are the two that are not characters at all: a
+    /// backspace arrives as a control byte and has to become the key, or it would go into the box
+    /// as an invisible character and the Commander could never correct a mistake.
+    pub fn typed(&mut self, text: &str) {
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        };
+
+        for character in text.chars() {
+            match character {
+                // Backspace, and delete, which some layouts send instead.
+                '\u{8}' | '\u{7f}' => self.typing.push(key(egui::Key::Backspace)),
+                '\r' | '\n' => self.typing.push(key(egui::Key::Enter)),
+                // Everything else that is not a control code. A stray one typed into a folder
+                // path is a setting that will never resolve, with nothing on screen to say why.
+                other if !other.is_control() => {
+                    self.typing.push(egui::Event::Text(other.to_string()));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Whether anything on the panel is waiting to be typed into.
+    ///
+    /// Asked of the toolkit rather than tracked here, so a box that takes focus because something
+    /// else asked for it — the compose field re-focusing itself after a question — opens the
+    /// keyboard the same way a box the Commander pointed at does.
+    #[must_use]
+    pub fn wants_typing(&self) -> bool {
+        self.context.egui_wants_keyboard_input()
+    }
+
     /// Adds a wheel's worth of scrolling, to be delivered on the next frame.
     ///
     /// Accumulated rather than replaced. Several scroll events routinely arrive between two of
@@ -324,6 +367,10 @@ impl Renderer {
 
         // Taken rather than read, so a wheel's turn is delivered once. Left in place it would be
         // reapplied every frame and the panel would scroll forever from one flick.
+        // Drained for the same reason the scrolling below is: delivered once, rather than
+        // retyped every frame for as long as nothing else arrives.
+        events.append(&mut self.typing);
+
         let scrolled = std::mem::replace(&mut self.scrolled, egui::Vec2::ZERO);
         if scrolled != egui::Vec2::ZERO {
             events.push(egui::Event::MouseWheel {

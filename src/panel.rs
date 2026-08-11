@@ -42,16 +42,20 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// What a summon should open, given what is showing now.
+    /// The next mode round, which is what the key does.
     ///
-    /// Asking for the panel when it is already big is asking to put it away. Anything else opens
-    /// it fully — a Commander who says "panel" while glancing at the mini one wants the whole
-    /// thing.
+    /// **Every mode is reachable from the key alone.** It was a toggle at first, on the reasoning
+    /// that somebody glancing at the mini panel who asks for the panel wants the whole thing. That
+    /// reasoning quietly assumed the other two doors into mini were open, and they were not: the
+    /// spoken route needs the model to be listening and the grab needs controllers in hand. A
+    /// Commander with neither had no way to reach mini at all, which is not a preference about
+    /// cycling - it is a mode that shipped unreachable.
     #[must_use]
-    pub fn toggled(self) -> Self {
+    pub fn cycled(self) -> Self {
         match self {
+            Mode::Gone => Mode::Mini,
+            Mode::Mini => Mode::Big,
             Mode::Big => Mode::Gone,
-            _ => Mode::Big,
         }
     }
 
@@ -238,20 +242,29 @@ mod tests {
     }
 
     #[test]
-    fn asking_for_the_panel_again_puts_it_away() {
-        // Three states and one control. A summon that could only open would leave the hotkey and
-        // the spoken word able to show the panel and not to dismiss it, which is half a feature.
-        assert_eq!(Mode::Gone.toggled(), Mode::Big);
-        assert_eq!(Mode::Mini.toggled(), Mode::Big);
-        assert_eq!(Mode::Big.toggled(), Mode::Gone);
+    fn the_key_alone_reaches_every_mode_and_comes_back() {
+        // The failure this replaced: mini shipped reachable only by voice and by grabbing, so a
+        // Commander with no controllers in hand and nothing being transcribed could not get to it
+        // at all. One key, three presses, back where you started.
+        let mut mode = Mode::Gone;
+        let mut seen = vec![mode];
+
+        for _ in 0..3 {
+            mode = mode.cycled();
+            seen.push(mode);
+        }
+
+        assert_eq!(
+            seen,
+            vec![Mode::Gone, Mode::Mini, Mode::Big, Mode::Gone],
+            "the key has to reach mini and get back out"
+        );
     }
 
     #[test]
-    fn glancing_at_the_mini_panel_and_asking_for_it_opens_the_big_one() {
-        // The specific case: a Commander looking at the mini panel who summons the panel wants the
-        // whole thing, not for it to disappear.
-        assert_eq!(Mode::Mini.toggled(), Mode::Big);
+    fn the_panel_is_showing_in_both_of_the_modes_that_draw() {
         assert!(Mode::Mini.showing());
+        assert!(Mode::Big.showing());
         assert!(!Mode::Gone.showing());
     }
 

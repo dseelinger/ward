@@ -115,12 +115,6 @@ const PANEL_PIXELS: (u32, u32) = (1900, 1200);
 /// whole point of a surface meant to be read without looking directly at it.
 const MINI_PIXELS: (u32, u32) = (640, 280);
 
-/// How close a controller has to be to count as touching the panel, in metres.
-///
-/// Generous, because this is a grab rather than a pinch: the Commander is reaching for a surface
-/// they can see, and being told they missed it by four centimetres is not useful feedback.
-const REACH: f32 = 0.35;
-
 /// How long a mode change is left alone before another gesture can be read.
 ///
 /// A grab is held across many frames and a flick is a hand that stays fast for a tenth of a
@@ -298,14 +292,24 @@ struct Panel {
     summon_down: bool,
     /// When the mode last changed on its own, so one gesture cannot fire twice.
     settled: Option<Instant>,
+    /// Whether SteamVR's keyboard is up, so it is asked for once rather than every frame a text
+    /// box has focus.
+    typing: bool,
+    /// Whether any controller has ever been seen, said once. A grab that does nothing is otherwise
+    /// indistinguishable from a grab that was not noticed, and the difference is the whole
+    /// diagnosis.
+    saw_controllers: bool,
 }
 
 /// A hand that has taken hold of the panel.
 #[derive(Clone, Copy)]
 struct Grab {
-    /// Where the panel was relative to the hand when it was grabbed, so it can be carried without
-    /// snapping its center to the controller.
-    offset: glam::Vec3,
+    /// How far down the ray the panel was when it was taken hold of.
+    ///
+    /// Held rather than recomputed, so the panel keeps its distance while it is carried. Without
+    /// it the panel would slide up the ray to a fixed distance the moment it was grabbed, which
+    /// reads as it jumping at you.
+    reach: f32,
 }
 
 impl Panel {
@@ -320,7 +324,7 @@ impl Panel {
         let view = engine.view();
 
         self.summoned(session, &view);
-        self.gestured(session);
+        self.gestured(session, layer);
 
         if !self.mode.showing() {
             if self.visible {
@@ -341,6 +345,9 @@ impl Panel {
         for intent in wants {
             engine.tell(intent);
         }
+
+        // After drawing, because whether anything wants typing is something the frame decides.
+        self.keyboard(layer, art);
 
         let Some(image) = art.vulkan_image() else {
             return Err("the renderer produced no image OpenVR could read".into());
@@ -407,6 +414,8 @@ impl Panel {
                     art.press(down);
                 }
                 crate::vr::Event::Scrolled { x, y } => art.scroll(x, y),
+                crate::vr::Event::Typed(text) => art.typed(&text),
+                crate::vr::Event::DoneTyping => self.typing = false,
                 crate::vr::Event::Left => {
                     art.point_at(None);
                     // The button is not released here. egui keeps it down on purpose when the
@@ -454,7 +463,7 @@ impl Panel {
         // The press, not the hold. A key read as held would toggle the panel sixty times a second
         // for as long as a finger stayed on it.
         if down && !self.summon_down {
-            self.change(self.mode.toggled());
+            self.change(self.mode.cycled());
         }
         self.summon_down = down;
 
@@ -467,10 +476,16 @@ impl Panel {
     }
 
     /// Grab from mini to expand, and flick to dismiss.
-    fn gestured(&mut self, session: &crate::vr::Vr) {
-        let Some(placed) = self.placed else {
+    ///
+    /// **Aimed rather than reached for.** The first version of this asked whether a hand was
+    /// within a arm's length of the panel's center, which is a test that can never pass: the panel
+    /// is put a metre and a half away so it can be read, and a seated Commander's hand reaches
+    /// about half that. Pointing at it and squeezing is both what works at that distance and what
+    /// every other headset surface already taught them to do.
+    fn gestured(&mut self, session: &crate::vr::Vr, layer: &crate::vr::Overlay<'_>) {
+        if self.placed.is_none() {
             return;
-        };
+        }
 
         // A gesture is many frames long. Without this, the frames after the one that opened the
         // panel are still a hand moving fast with the grip held, and the same movement would be
@@ -481,24 +496,49 @@ impl Panel {
 
         let controllers = session.controllers();
 
-        // Whichever hand is holding it, or the nearest one reaching for it with the grip held.
-        let grabbing = controllers.iter().find(|hand| {
-            hand.grip
-                && (self.held.is_some() || hand.at.distance(placed.translation.into()) < REACH)
+        // Said once, and only once there is something to say. A grab that does nothing because no
+        // controller was ever seen looks exactly like a grab that was seen and ignored, and the
+        // legacy input this reads is the kind of thing SteamVR turns off without telling anybody.
+        if !self.saw_controllers && !controllers.is_empty() {
+            tracing::info!(
+                target: "ward::vr",
+                controllers = controllers.len(),
+                "controllers found, so the panel can be grabbed"
+            );
+            self.saw_controllers = true;
+        }
+
+        // Already holding it, or pointing at it and squeezing. Once held, where the ray is stops
+        // mattering: letting go is what ends a grab, not aiming away.
+        let taking = controllers.iter().find_map(|hand| {
+            if !hand.grip {
+                return None;
+            }
+
+            match self.held {
+                Some(grab) => Some((hand, grab)),
+                None => layer.hit_by(hand.at, hand.forward).map(|hit| {
+                    (
+                        hand,
+                        Grab {
+                            reach: hit.distance,
+                        },
+                    )
+                }),
+            }
         });
 
-        match (grabbing, self.held) {
-            // Taking hold. The offset is remembered so the panel does not snap its center onto the
-            // controller the instant it is touched.
-            (Some(hand), None) => {
-                self.held = Some(Grab {
-                    offset: glam::Vec3::from(placed.translation) - hand.at,
-                });
+        match (taking, self.held.is_some()) {
+            // Taking hold. The distance is remembered so the panel stays where it is rather than
+            // sliding up the ray the instant it is caught.
+            (Some((_, grab)), false) => {
+                tracing::info!(target: "ward::vr", reach = grab.reach, "panel taken hold of");
+                self.held = Some(grab);
             }
-            // Carrying it. Moved rather than reoriented: a panel that rolled with the wrist would
-            // be one you cannot put down level.
-            (Some(hand), Some(grab)) => {
-                let at = hand.at + grab.offset;
+            // Carrying it, out along the ray. Turned to face the Commander rather than rolled with
+            // the wrist, because a panel that rolls is one you cannot put down level.
+            (Some((hand, grab)), true) => {
+                let at = hand.at + hand.forward * grab.reach;
                 self.placed = Some(glam::Affine3A::from_rotation_translation(
                     facing(session, at),
                     at,
@@ -511,7 +551,7 @@ impl Panel {
                 }
             }
             // Let go. Fast enough and it was thrown away rather than put down.
-            (None, Some(_)) => {
+            (None, true) => {
                 self.held = None;
 
                 let thrown = controllers.iter().any(|hand| hand.speed.length() > FLICK);
@@ -521,7 +561,33 @@ impl Panel {
                     self.change(Mode::Gone);
                 }
             }
-            (None, None) => {}
+            (None, false) => {}
+        }
+    }
+
+    /// Asks for SteamVR's keyboard when something wants typing, and takes it away when nothing
+    /// does.
+    ///
+    /// The toolkit is the one that knows, so this follows it rather than guessing from what was
+    /// clicked. A box that took focus because Ward asked it to — the compose field re-focusing
+    /// itself after a question — opens the keyboard the same way one the Commander pointed at
+    /// does.
+    fn keyboard(&mut self, layer: &crate::vr::Overlay<'_>, art: &crate::render::Renderer) {
+        let wanted = art.wants_typing();
+
+        if wanted && !self.typing {
+            match layer.show_keyboard("Ward", "") {
+                Ok(()) => self.typing = true,
+                Err(e) => {
+                    tracing::warn!(target: "ward::vr", error = %e, "no keyboard in the headset");
+                    // Marked as up anyway, so a refusal is one line in the log rather than one
+                    // every frame for as long as the box has focus.
+                    self.typing = true;
+                }
+            }
+        } else if !wanted && self.typing {
+            layer.hide_keyboard();
+            self.typing = false;
         }
     }
 

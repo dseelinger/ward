@@ -60,13 +60,20 @@ Because in a headset there is always one of the three that is inconvenient.
 }
 ```
 
-The key toggles. Pressing it with the big panel up puts it away; pressing it any
-other time brings it up.
+The key cycles: away, small, big, away. Every mode is reachable from the key
+alone, which matters because the other two routes each need something — the
+spoken one needs Ward to be hearing you, and the grab needs a controller in
+your hand.
 
-**Use your hands.** Reach out and squeeze the grip to take hold of the panel, and
-it moves with your hand — so you can put it where you want it rather than where
-Ward guessed. Grabbing the mini panel pulls it open into the big one. Let go with
-your hand still moving and you have thrown it away, and it is gone.
+**Use your hands.** Point at the panel and squeeze the grip to take hold of it.
+It then moves with your hand, keeping the distance it had when you caught it, so
+you can put it where you want rather than where Ward guessed. Grabbing the small
+panel pulls it open into the big one. Let go with your hand still moving and you
+have thrown it away, and it is gone.
+
+You point at it rather than reaching for it because the panel is a metre and a
+half away — far enough to read comfortably, and further than you can reach
+sitting down.
 
 ## Pointing at it
 
@@ -78,6 +85,14 @@ Ward tells the toolkit that it is being pointed at rather than moused at. A ray
 at a metre and a half turns an ordinary steady hand into more drift than a
 desktop toolkit will accept in a click, and about half of them were being thrown
 away as accidental drags before that was fixed.
+
+## Typing
+
+Point at any text box and SteamVR's own keyboard comes up, with your layout and
+the way of typing you already know. What you type goes into the box as you type
+it, and the keyboard goes away when you move on. Ward does not draw a keyboard
+of its own — a worse copy that you would have to point at with the same ray it
+was competing with.
 
 The conversation is deliberately not selectable text. Dragging a selection across
 a log that is growing underneath you is a poor experience with a mouse and a

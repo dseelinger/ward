@@ -90,7 +90,7 @@ pub struct Vr {
 ///
 /// Translated here rather than passed on raw, so nothing above this file has to know that OpenVR
 /// counts Y from the bottom or spells a button as an integer.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// Where the ray is pointing, in the overlay's own pixels, measured from the top left.
     Moved { x: f32, y: f32 },
@@ -100,6 +100,10 @@ pub enum Event {
     Scrolled { x: f32, y: f32 },
     /// The ray left the overlay entirely, so there is nothing being pointed at.
     Left,
+    /// Something was typed on SteamVR's keyboard. One or more characters, as they arrive.
+    Typed(String),
+    /// The keyboard was closed, whether by finishing or by giving up.
+    DoneTyping,
 }
 
 /// Where a controller is, and what is held down on it.
@@ -107,6 +111,12 @@ pub enum Event {
 pub struct Controller {
     /// Where it is in the room, in metres.
     pub at: glam::Vec3,
+    /// Which way it is pointing. Negative Z, the way every tracked device in OpenVR points.
+    ///
+    /// This is what a grab is aimed with. Reaching out and touching a panel only works for one
+    /// close enough to touch, and a panel a Commander can read is a metre and a half away — well
+    /// past where a seated arm ends.
+    pub forward: glam::Vec3,
     /// How fast it is moving, in metres per second. What a flick is made of.
     pub speed: glam::Vec3,
     /// Whether the grip is squeezed, which is the only button read here.
@@ -114,6 +124,13 @@ pub struct Controller {
     /// The trigger is deliberately absent. SteamVR already delivers it as an overlay mouse click,
     /// and reading it a second time here would be one press understood as two things.
     pub grip: bool,
+}
+
+/// Where a ray met an overlay.
+#[derive(Clone, Copy, Debug)]
+pub struct Hit {
+    /// How far along the ray the overlay is, in metres.
+    pub distance: f32,
 }
 
 impl Vr {
@@ -229,6 +246,7 @@ impl Vr {
 
             found.push(Controller {
                 at: placed.translation.into(),
+                forward: -glam::Vec3::from(placed.matrix3.z_axis),
                 speed: glam::Vec3::new(velocity[0], velocity[1], velocity[2]),
                 grip: held(sys::EVRButtonId_k_EButton_Grip),
             });
@@ -515,6 +533,9 @@ impl Overlay<'_> {
         const DISCRETE: u32 = sys::EVREventType_VREvent_ScrollDiscrete.cast_unsigned();
         const SMOOTH: u32 = sys::EVREventType_VREvent_ScrollSmooth.cast_unsigned();
         const LEFT: u32 = sys::EVREventType_VREvent_FocusLeave.cast_unsigned();
+        const TYPED: u32 = sys::EVREventType_VREvent_KeyboardCharInput.cast_unsigned();
+        const DONE: u32 = sys::EVREventType_VREvent_KeyboardDone.cast_unsigned();
+        const CLOSED: u32 = sys::EVREventType_VREvent_KeyboardClosed.cast_unsigned();
         const TRIGGER: u32 = sys::EVRMouseButton_VRMouseButton_Left.cast_unsigned();
 
         let mut event = sys::VREvent_t::default();
@@ -550,6 +571,20 @@ impl Overlay<'_> {
                         y: scroll.ydelta,
                     })
                 }
+                TYPED => {
+                    let typed = unsafe { event.data.keyboard.cNewInput };
+
+                    // A fixed eight byte buffer that is not required to be terminated when full, so
+                    // the length is taken from the first zero rather than trusted from the array.
+                    let bytes: Vec<u8> = typed
+                        .iter()
+                        .take_while(|byte| **byte != 0)
+                        .map(|byte| byte.cast_unsigned())
+                        .collect();
+
+                    String::from_utf8(bytes).ok().map(Event::Typed)
+                }
+                DONE | CLOSED => Some(Event::DoneTyping),
                 LEFT => Some(Event::Left),
                 _ => None,
             };
@@ -558,6 +593,82 @@ impl Overlay<'_> {
         }
 
         out
+    }
+
+    /// Where a ray meets this overlay, if it does.
+    ///
+    /// Asked of OpenVR rather than worked out here, because OpenVR already knows where the
+    /// overlay is, how big it is and which way it is turned — and it is the same test SteamVR
+    /// uses to decide where a pointer lands, so a grab and a click agree about what is being
+    /// aimed at.
+    #[must_use]
+    pub fn hit_by(&self, source: glam::Vec3, direction: glam::Vec3) -> Option<Hit> {
+        let compute = self.table.ComputeOverlayIntersection?;
+
+        let mut params = sys::VROverlayIntersectionParams_t {
+            vSource: sys::HmdVector3_t {
+                v: source.to_array(),
+            },
+            vDirection: sys::HmdVector3_t {
+                v: direction.to_array(),
+            },
+            eOrigin: STANDING,
+        };
+        let mut results = sys::VROverlayIntersectionResults_t::default();
+
+        unsafe { compute(self.handle, &raw mut params, &raw mut results) }.then_some(Hit {
+            distance: results.fDistance,
+        })
+    }
+
+    /// Puts SteamVR's own keyboard in front of the Commander.
+    ///
+    /// Ward does not draw one. A headset already has a keyboard the Commander knows, with their
+    /// own layout and their own way of typing on it, and a second one drawn into this overlay
+    /// would be a worse copy that also has to be pointed at with the same ray it is competing
+    /// with.
+    ///
+    /// What comes back arrives through [`Self::events`] as [`Event::Typed`], one character at a
+    /// time, which is what the toolkit wants anyway.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the call is refused. A keyboard already up is not an error worth propagating —
+    /// it means the Commander is already typing.
+    pub fn show_keyboard(&self, description: &str, existing: &str) -> Result<(), Error> {
+        let show = self
+            .table
+            .ShowKeyboardForOverlay
+            .ok_or(Error::MissingInterface("ShowKeyboardForOverlay"))?;
+
+        let description = CString::new(description).unwrap_or_default();
+        let existing = CString::new(existing).unwrap_or_default();
+
+        let code = unsafe {
+            show(
+                self.handle,
+                sys::EGamepadTextInputMode_k_EGamepadTextInputModeNormal,
+                sys::EGamepadTextInputLineMode_k_EGamepadTextInputLineModeSingleLine,
+                0,
+                description.as_ptr().cast_mut(),
+                MOST_TYPED,
+                existing.as_ptr().cast_mut(),
+                0,
+            )
+        };
+
+        if code == sys::EVROverlayError_VROverlayError_KeyboardAlreadyInUse {
+            return Ok(());
+        }
+
+        check("ShowKeyboardForOverlay", code)
+    }
+
+    /// Takes the keyboard away.
+    pub fn hide_keyboard(&self) {
+        if let Some(hide) = self.table.HideKeyboard {
+            unsafe { hide() };
+        }
     }
 
     /// Puts the overlay on screen.
@@ -646,6 +757,12 @@ const HMD: u32 = sys::k_unTrackedDeviceIndex_Hmd;
 
 /// How many devices OpenVR can track at once, which is the size of every pose array it fills.
 const DEVICES: u32 = sys::k_unMaxTrackedDeviceCount;
+
+/// The most characters SteamVR's keyboard will collect before it stops taking any.
+///
+/// Generous, because the longest thing anybody types into Ward is a folder path or an API key,
+/// and a keyboard that silently stops accepting input is worse than one that never opened.
+const MOST_TYPED: u32 = 1024;
 
 /// Room scale, so a panel put down stays where it was put.
 ///

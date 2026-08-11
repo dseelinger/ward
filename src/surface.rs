@@ -379,15 +379,24 @@ fn checklist(ui: &mut egui::Ui, view: &View, local: &mut Local, out: &mut Vec<In
             ui.horizontal_top(|ui| {
                 let mut done = row.done;
 
-                // Only ever forward. Unticking is a different question, and
-                // putting a control on screen with no spoken equivalent is how
-                // the surfaces start disagreeing about what can be done.
-                if ui
-                    .add_enabled(!done, egui::Checkbox::new(&mut done, ""))
-                    .on_hover_text("Mark as done")
-                    .clicked()
-                {
-                    out.push(Intent::Tool("checklist_complete", row.text.clone()));
+                // Both ways. It used to tick and never untick, on the reasoning that a control
+                // with no spoken equivalent is how two surfaces start disagreeing about what can
+                // be done - which was the right rule and the wrong fix. The fix is the tool, so
+                // the model can put an item back too, and then the box is free to do what a box
+                // does.
+                let hint = match done {
+                    true => "Put it back on the list",
+                    false => "Mark as done",
+                };
+
+                if ui.checkbox(&mut done, "").on_hover_text(hint).clicked() {
+                    out.push(Intent::Tool(
+                        match row.done {
+                            true => "checklist_reopen",
+                            false => "checklist_complete",
+                        },
+                        row.text.clone(),
+                    ));
                 }
 
                 let label = match row.done {

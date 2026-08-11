@@ -1,0 +1,51 @@
+name: pages
+
+# Publishes the documentation site.
+#
+# Separate from `check.yml`, which builds the site and throws it away on every
+# change. That one is the check and this one is the publication, and keeping
+# them apart means a broken page fails the change that broke it rather than
+# only being noticed when nothing appears on the web.
+#
+# On main rather than on a release. The argument for release-only is that the
+# site then always describes a version somebody can install and never describes
+# unreleased work, which is the better rule once there is something to install.
+# There is not yet, so release-only would mean no site at all. One line to
+# change when the first release exists.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One publication at a time, and a newer one wins. A queue of these would spend
+# minutes publishing versions of the site nobody will ever see.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@mdbook
+
+      - run: mdbook build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: book
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

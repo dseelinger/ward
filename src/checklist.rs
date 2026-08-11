@@ -63,6 +63,12 @@ const HEADER: [&str; 2] = ["# Checklist", ""];
 /// notices.
 const MOST_ITEMS: usize = 200;
 
+/// Nothing to configure. The list is a file the Commander can open, which is
+/// the setting. Kept as an empty list rather than left out, so the settings
+/// page is composed from every capability rather than from the ones somebody
+/// remembered had rows.
+pub static SETTINGS: &[crate::schema::Row] = &[];
+
 /// One line of the file.
 ///
 /// Everything is kept, not only the parts Ward understands. The alternative is
@@ -459,6 +465,10 @@ impl Capability for Checklist {
 
     fn tools(&self) -> &'static [Tool] {
         TOOLS
+    }
+
+    fn settings(&self) -> &'static [crate::schema::Row] {
+        SETTINGS
     }
 
     fn display(&self) -> Option<Shown> {

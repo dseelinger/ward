@@ -19,6 +19,7 @@ use crate::capability::Registry;
 use crate::sse;
 
 const API: &str = "https://api.anthropic.com/v1/messages";
+const CATALOG: &str = "https://api.anthropic.com/v1/models";
 const VERSION: &str = "2023-06-01";
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5";
@@ -71,6 +72,58 @@ pub enum Event {
     Failed(String),
 }
 
+/// Which models this key can actually use.
+///
+/// Asked rather than hardcoded, because a list compiled in goes stale the week
+/// a model ships and there is no way for a Commander to notice. It costs
+/// nothing in tokens, which is also what makes it the honest way to find out
+/// whether a key works at all.
+pub async fn models(api_key: &str) -> Result<Vec<String>, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{CATALOG}?limit=100"))
+        .header("x-api-key", api_key)
+        .header("anthropic-version", VERSION)
+        .send()
+        .await
+        .map_err(|e| format!("could not reach the model service: {e}"))?;
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        // The service's own words. A guess at what a rejection meant is how a
+        // Commander spends an evening on the wrong problem.
+        let said: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+        let reason = said["error"]["message"]
+            .as_str()
+            .unwrap_or("no reason given")
+            .to_string();
+
+        return Err(match status.as_u16() {
+            401 => format!("that key was refused: {reason}"),
+            _ => format!("the model service said {status}: {reason}"),
+        });
+    }
+
+    let listed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("could not read the model list: {e}"))?;
+
+    let models: Vec<String> = listed["data"]
+        .as_array()
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|m| m["id"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    match models.is_empty() {
+        true => Err("the model service returned no models".to_string()),
+        false => Ok(models),
+    }
+}
+
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
@@ -93,6 +146,20 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
+    /// The same key against a different model and a rebuilt registry.
+    ///
+    /// The key never travels back out through a settings page to get here,
+    /// which is the point: rotating a model is not an occasion to handle a
+    /// secret.
+    pub fn with(&self, model: String, registry: Arc<Registry>) -> Self {
+        Self {
+            http: self.http.clone(),
+            api_key: self.api_key.clone(),
+            model,
+            registry,
+        }
+    }
+
     pub fn new(api_key: String, model: String, registry: Arc<Registry>) -> Self {
         Self {
             http: reqwest::Client::new(),

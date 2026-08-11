@@ -168,6 +168,31 @@ mod tests {
         assert!(answer.contains('.'), "should look like a version: {answer}");
     }
 
+    #[test]
+    fn every_setting_a_capability_contributes_reaches_the_page() {
+        // What this catches, precisely: a capability declaring rows that the
+        // schema was never told to compose. It cannot catch the two disagreeing
+        // about a key, because they are the same static - which is the point of
+        // it being a static, and the reason this test asserts the weaker thing
+        // rather than pretending to assert the stronger one.
+        //
+        // The failure is worth catching. An uncomposed row is a feature the
+        // Commander cannot switch on, and a settings file rejected for naming
+        // the setting the feature reads.
+        let page: Vec<&str> = crate::schema::all().iter().map(|row| row.key).collect();
+
+        for capability in test_registry().capabilities() {
+            for row in capability.settings() {
+                assert!(
+                    page.contains(&row.key),
+                    "{} contributes \"{}\", and it is not on the settings page",
+                    capability.id(),
+                    row.key
+                );
+            }
+        }
+    }
+
     // --- documentation -------------------------------------------------------
     //
     // A capability is not complete until its page exists, and these are what

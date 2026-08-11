@@ -125,6 +125,90 @@ fn is_audio(headers: &[u8]) -> bool {
     String::from_utf8_lossy(headers).contains("Path:audio\r\n")
 }
 
+/// One voice the service offers.
+pub struct Voice {
+    /// What the setting stores, such as `en-US-AndrewNeural`.
+    pub name: String,
+    /// What a person reads, such as `Andrew`.
+    pub friendly: String,
+    pub locale: String,
+    pub gender: String,
+}
+
+impl Voice {
+    /// Everything worth matching a search against, in one string.
+    pub fn searchable(&self) -> String {
+        format!(
+            "{} {} {} {}",
+            self.name, self.friendly, self.locale, self.gender
+        )
+        .to_lowercase()
+    }
+}
+
+/// Every voice the service will speak in.
+///
+/// Hundreds of them, which is why choosing one needs browsing and searching
+/// rather than a name typed from memory. Fetched rather than compiled in: the
+/// list changes, and a stale list offers voices that no longer answer.
+pub async fn voices() -> Result<Vec<Voice>> {
+    let url = format!(
+        "https://{HOST}/consumer/speech/synthesize/readaloud/voices/list\
+         ?trustedclienttoken={TOKEN}"
+    );
+
+    let listed: serde_json::Value = reqwest::Client::new()
+        .get(&url)
+        .header(
+            "User-Agent",
+            format!(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36 Edg/{major}.0.0.0",
+                major = CLIENT.split('.').next().unwrap_or("143")
+            ),
+        )
+        .send()
+        .await
+        .map_err(|e| anyhow!("could not reach the voice service: {e}"))?
+        .json()
+        .await
+        .map_err(|e| anyhow!("could not read the voice list: {e}"))?;
+
+    let mut voices: Vec<Voice> = listed
+        .as_array()
+        .map(|all| {
+            all.iter()
+                .filter_map(|v| {
+                    let name = v["ShortName"].as_str()?.to_string();
+
+                    // The service's friendly name is a sentence. The part
+                    // worth showing is the person's name inside it.
+                    let friendly = v["FriendlyName"]
+                        .as_str()
+                        .and_then(|f| f.split_whitespace().nth(1))
+                        .unwrap_or(&name)
+                        .to_string();
+
+                    Some(Voice {
+                        name,
+                        friendly,
+                        locale: v["Locale"].as_str().unwrap_or_default().to_string(),
+                        gender: v["Gender"].as_str().unwrap_or_default().to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if voices.is_empty() {
+        return Err(anyhow!("the voice service returned no voices"));
+    }
+
+    voices.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(voices)
+}
+
 /// A handle on speech in progress, so it can be cut off mid-word.
 ///
 /// This is the ducking half of barge-in. A Commander who presses the key while
@@ -161,6 +245,16 @@ impl Playing {
             Err(poisoned) => *poisoned.into_inner() = player,
         }
     }
+}
+
+/// Which device Ward will speak through, or why it cannot.
+///
+/// Opens it rather than asking whether one exists, because the failure worth
+/// catching is a device that is listed and will not start.
+pub fn speakers() -> Result<String> {
+    let device = rodio::DeviceSinkBuilder::open_default_sink().context("no audio output device")?;
+    let _ = device.mixer();
+    Ok("the default output device".to_string())
 }
 
 /// Plays audio and returns when it has finished, or when it was cut off.

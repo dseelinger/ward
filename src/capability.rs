@@ -136,6 +136,21 @@ pub trait Capability: Send + Sync {
         format!("{} has no tool called {tool}", self.id())
     }
 
+    /// The settings this capability contributes to the page.
+    ///
+    /// Declared here as well as composed in the schema, and a test holds the
+    /// two together. Without it a capability can read a setting that has no
+    /// row, which presents as a feature the Commander cannot switch on and a
+    /// settings file that gets rejected for naming it.
+    ///
+    /// Read only by that test today: the page is drawn from the schema, which
+    /// is the composed list. This is the other end of the pair, and marked
+    /// rather than left as a silent warning.
+    #[allow(dead_code)]
+    fn settings(&self) -> &'static [crate::schema::Row] {
+        &[]
+    }
+
     /// What this capability currently has to show, if anything.
     ///
     /// The other half of a capability being reachable without being asked. A

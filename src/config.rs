@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 /// Everything writable lives in one folder beside the executable: one thing to
 /// delete for a genuine first run, one thing to copy, one thing an installer
@@ -42,59 +42,13 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("data"))
 }
 
-/// The single registry of what a setting is called and what it defaults to.
+/// What a setting defaults to, or nothing if Ward has no such setting.
 ///
-/// Deliberately one list rather than a list of names beside a table of
-/// defaults. Two declarations that have to agree are two declarations that
-/// eventually do not, and the failure here would be a correct settings file
-/// rejected as unrecognized.
-///
-/// Keys are spelled the way a person would say them out loud, because the same
-/// string is the name in the settings page, the name in help, and the name in
-/// the message about a rejected file.
+/// One declaration, in `schema`, holding the name and the default together.
+/// Two declarations that have to agree are two that eventually do not, and the
+/// failure here is a correct settings file rejected as unrecognized.
 pub fn default_setting(key: &str) -> Option<Value> {
-    match key {
-        "model" => Some(json!(crate::anthropic::DEFAULT_MODEL)),
-        // Chosen to be readable on a high-resolution display without anyone
-        // adjusting it. Multiplies the display's own scale factor rather than
-        // replacing it.
-        "text size" => Some(json!(1.35)),
-        "voice" => Some(json!(crate::voice::DEFAULT_VOICE)),
-        // Percentage against the voice's natural pace, in the form the service
-        // expects. Never a bare multiplier: providers disagree about what
-        // range they accept, and a number that suits one clips against another.
-        "speaking rate" => Some(json!("+0%")),
-        // Where the game writes its journal. Resolved against the user profile
-        // rather than stored absolute, so a settings file never carries
-        // somebody's account name around in it.
-        "journal folder" => Some(json!(default_journal_folder())),
-        "bindings folder" => Some(json!(default_bindings_folder())),
-        // Off unless switched on. Automation that presses a fire key should be
-        // a choice somebody made rather than a surprise on first run.
-        "auto honk" => Some(json!(false)),
-        // Named the way the game names keys, because that is the vocabulary a
-        // Commander already has and it is what lets Ward check the choice
-        // against their own bindings file.
-        //
-        // The right shift key: large enough to find by touch with a headset on,
-        // and left unbound by the game, which binds thrust to the left one.
-        "push to talk key" => Some(json!("Key_RightShift")),
-        // Relative, and resolved against the data folder. An absolute path is
-        // honored as given, which is what lets a model live outside a folder
-        // that gets deleted.
-        "speech model" => Some(json!(r"models\ggml-small.en.bin")),
-        _ => None,
-    }
-}
-
-fn default_bindings_folder() -> String {
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    format!(r"{local}\Frontier Developments\Elite Dangerous\Options\Bindings")
-}
-
-fn default_journal_folder() -> String {
-    let profile = std::env::var("USERPROFILE").unwrap_or_default();
-    format!(r"{profile}\Saved Games\Frontier Developments\Elite Dangerous")
+    crate::schema::row(key).map(|row| (row.default)())
 }
 
 /// What the Commander chose. Holds overrides only.
@@ -135,7 +89,6 @@ impl Settings {
     /// separate work - so the only callers today are the tests that prove a
     /// value survives a restart. Recorded here rather than left as a silent
     /// warning.
-    #[allow(dead_code)]
     pub fn save(&self, path: &Path) -> Result<()> {
         write_object(path, &self.overrides)
     }
@@ -187,7 +140,6 @@ impl Settings {
     ///
     /// Assigning the default *is* clearing: the override is removed rather than
     /// written, so the file only ever contains genuine changes.
-    #[allow(dead_code)]
     pub fn set(&mut self, key: &str, value: Value) {
         if default_setting(key).as_ref() == Some(&value) {
             self.overrides.remove(key);
@@ -196,9 +148,17 @@ impl Settings {
         }
     }
 
-    #[allow(dead_code)]
     pub fn clear(&mut self, key: &str) {
         self.overrides.remove(key);
+    }
+
+    /// Whether the Commander chose this, or it is Ward's own default.
+    ///
+    /// What the settings page needs to decide between showing a value and
+    /// showing a placeholder, which is the difference between a choice and a
+    /// suggestion.
+    pub fn overridden(&self, key: &str) -> bool {
+        self.overrides.contains_key(key)
     }
 
     /// How many settings differ from their defaults.
@@ -322,6 +282,7 @@ pub fn write_atomically(path: &Path, body: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn temp(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("ward-config-test-{name}"));

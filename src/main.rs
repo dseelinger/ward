@@ -21,12 +21,14 @@ mod honk;
 mod journal;
 mod listen;
 mod mic;
+mod page;
 mod press;
 // Test infrastructure rather than application code: its whole purpose is to
 // stand in for the game. It compiles only for tests, so it cannot quietly
 // become something the running application depends on.
 #[cfg(test)]
 mod replay;
+mod schema;
 mod secrets;
 mod shown;
 mod speech;
@@ -156,6 +158,111 @@ fn as_the_window_system_counts_it(points: egui::Vec2, zoom: f32) -> egui::Vec2 {
     points * zoom
 }
 
+/// Checks the things that fail quietly.
+///
+/// Every one of these stands for an evening somebody could otherwise lose. A
+/// microphone that was never chosen, a key that was refused, a journal folder
+/// pointing at nothing — none of them announce themselves. They present as Ward
+/// simply not working, in a cockpit, with no way to tell which of five things
+/// is wrong.
+///
+/// Each check does the real thing rather than inspecting a setting. Opening the
+/// device is the only way to learn that it opens.
+async fn check_setup(settings: &Settings) -> Vec<page::Check> {
+    let mut checks = Vec::new();
+
+    checks.push(match crate::mic::Microphone::open() {
+        Ok(_) => page::Check {
+            what: "Microphone",
+            ok: true,
+            detail: "Windows handed Ward a recording device and it started.".to_string(),
+        },
+        Err(e) => page::Check {
+            what: "Microphone",
+            ok: false,
+            detail: format!("{e:#}"),
+        },
+    });
+
+    checks.push(match crate::voice::speakers() {
+        Ok(name) => page::Check {
+            what: "Speakers",
+            ok: true,
+            detail: format!("Ward will speak through {name}."),
+        },
+        Err(e) => page::Check {
+            what: "Speakers",
+            ok: false,
+            detail: format!("{e:#}"),
+        },
+    });
+
+    let model = settings.file("speech model", &config::data_dir());
+    checks.push(page::Check {
+        what: "Speech model",
+        ok: model.is_file(),
+        detail: match model.is_file() {
+            true => format!("Found at {}.", model.display()),
+            false => format!(
+                "Nothing at {}. Ward cannot hear you until a model file is there.",
+                model.display()
+            ),
+        },
+    });
+
+    let folder = std::path::PathBuf::from(settings.string("journal folder"));
+    checks.push(match crate::journal::newest(&folder) {
+        Some(file) => page::Check {
+            what: "Elite's journal",
+            ok: true,
+            detail: format!(
+                "Reading {}.",
+                file.file_name().unwrap_or_default().to_string_lossy()
+            ),
+        },
+        None => page::Check {
+            what: "Elite's journal",
+            ok: false,
+            detail: format!(
+                "No journal in {}. Ward will not know where you are. This is \
+                 expected if the game has never run on this machine.",
+                folder.display()
+            ),
+        },
+    });
+
+    // Last, because it is the only one that touches the network, and a
+    // Commander reading down the list should have the local answers already.
+    let stored = secrets::load(&secrets::key_path(&config::data_dir()));
+
+    checks.push(match stored {
+        Ok(Some(key)) => match anthropic::models(&key).await {
+            Ok(models) => page::Check {
+                what: "API key",
+                ok: true,
+                detail: format!("Accepted. {} models available to it.", models.len()),
+            },
+            Err(why) => page::Check {
+                what: "API key",
+                ok: false,
+                detail: why,
+            },
+        },
+        Ok(None) => page::Check {
+            what: "API key",
+            ok: false,
+            detail: "No key stored. Ward can hear you and cannot answer.".to_string(),
+        },
+        Err(e) => page::Check {
+            what: "API key",
+            ok: false,
+            detail: format!("{e:#}"),
+        },
+    });
+
+    checks
+}
+
 enum Screen {
     /// No key stored yet, or the stored one could not be read.
     NeedKey {
@@ -212,7 +319,21 @@ struct Ward {
     /// A new checklist item being typed. Held here rather than in the panel so
     /// a half-typed line survives the frame it was typed on.
     adding: String,
+    /// The settings page, and whether it is what the window is showing.
+    page: page::Page,
+    settings_open: bool,
+    /// Answers to things the settings page asked for, which all take long
+    /// enough that asking on the drawing thread would stop the window.
+    errands: UnboundedReceiver<Errand>,
+    errand: UnboundedSender<Errand>,
     window: egui::Vec2,
+}
+
+/// Something the settings page asked for, come back.
+enum Errand {
+    Voices(Result<Vec<voice::Voice>, String>),
+    Models(Result<Vec<String>, String>),
+    Checks(Vec<page::Check>),
 }
 
 impl Ward {
@@ -284,6 +405,8 @@ impl Ward {
             },
         ));
 
+        let (errand_tx, errand_rx) = unbounded_channel();
+
         Self {
             settings,
             registry,
@@ -308,6 +431,10 @@ impl Ward {
             heard,
             listening: false,
             adding: String::new(),
+            page: page::Page::default(),
+            settings_open: false,
+            errands: errand_rx,
+            errand: errand_tx,
             window: egui::Vec2::new(980.0, 720.0),
         }
     }
@@ -489,6 +616,167 @@ impl Ward {
             let _ = tx.send(());
             ctx.request_repaint();
         });
+    }
+
+    /// Carries out what the settings page asked for.
+    ///
+    /// **Everything here takes effect now.** A setting that needs a restart is
+    /// a setting somebody changes, hears no difference from, and changes back —
+    /// and in a headset a restart means taking it off. Rebuilding the registry
+    /// and the client is cheaper than teaching every piece of Ward to notice a
+    /// setting moving underneath it, and it means one path applies all of them
+    /// rather than one path per setting that somebody has to remember to add.
+    fn apply(&mut self, wants: page::Wants, ctx: &egui::Context) {
+        if let Some(key) = wants.store_key {
+            match secrets::store(&secrets::key_path(&config::data_dir()), &key) {
+                Ok(()) => {
+                    tracing::info!(target: "ward::secrets", "key stored");
+                    self.client = Some(Client::new(
+                        key,
+                        self.settings.string("model"),
+                        self.registry.clone(),
+                    ));
+                    self.screen = Screen::Talking;
+                    self.page.key_stored();
+                    // A new key means a different list of models, and the old
+                    // one was answered for a key that is no longer in use.
+                    self.page.models = page::Options::Unasked;
+                }
+                Err(e) => {
+                    tracing::error!(target: "ward::secrets", error = %e, "could not store key");
+                    self.page.key_problem = Some(e.to_string());
+                }
+            }
+        }
+
+        if wants.changed {
+            if let Err(e) = self.settings.save(&Settings::path(&config::data_dir())) {
+                tracing::warn!(target: "ward::config", error = %e, "could not save settings");
+                self.problem = Some(format!("That change did not save: {e}"));
+            }
+
+            ctx.set_zoom_factor(self.settings.f32("text size", 0.5, 4.0));
+
+            // Rebuilt rather than nudged. A capability reads its settings when
+            // it is made, so the honest way to change one is to make it again.
+            // Not while a turn is in flight, because a tool is running against
+            // the registry that exists now.
+            if !self.streaming() {
+                self.registry =
+                    Arc::new(capabilities::registry(&self.settings, &config::data_dir()));
+
+                if let Some(client) = self.client.as_ref() {
+                    self.client =
+                        Some(client.with(self.settings.string("model"), self.registry.clone()));
+                }
+
+                tracing::info!(
+                    target: "ward::config",
+                    changed = self.settings.changed(),
+                    "settings applied"
+                );
+            }
+        }
+
+        if let Some(text) = wants.preview {
+            // Straight to the voice rather than onto the speech stream. This is
+            // the Commander auditioning a voice, not Ward saying something, and
+            // it must not queue behind a reply or land in the transcript.
+            let voice = self.settings.string("voice");
+            let rate = self.settings.string("speaking rate");
+            let playing = self.playing.clone();
+            let hush = self.hush.clone();
+
+            playing.stop();
+
+            self.runtime.spawn(async move {
+                match voice::synthesize(&text, &voice, &rate).await {
+                    Ok(speech) => {
+                        hush.speaking();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            voice::play(speech.audio, &playing)
+                        })
+                        .await;
+                        hush.stopped(diag::since_start());
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: "ward::voice", error = %e, "could not preview");
+                    }
+                }
+            });
+        }
+
+        if wants.fetch_voices {
+            self.page.voices = page::Options::Asking;
+            let errand = self.errand.clone();
+            let ctx = ctx.clone();
+
+            self.runtime.spawn(async move {
+                let got = voice::voices().await.map_err(|e| e.to_string());
+                let _ = errand.send(Errand::Voices(got));
+                ctx.request_repaint();
+            });
+        }
+
+        if wants.fetch_models {
+            self.page.models = page::Options::Asking;
+            let errand = self.errand.clone();
+            let ctx = ctx.clone();
+            let key = secrets::load(&secrets::key_path(&config::data_dir()))
+                .ok()
+                .flatten();
+
+            self.runtime.spawn(async move {
+                let got = match key {
+                    Some(key) => anthropic::models(&key).await,
+                    None => Err("there is no key stored yet".to_string()),
+                };
+                let _ = errand.send(Errand::Models(got));
+                ctx.request_repaint();
+            });
+        }
+
+        if wants.run_setup_test {
+            self.page.testing = true;
+            self.page.checks.clear();
+
+            let errand = self.errand.clone();
+            let ctx = ctx.clone();
+            let settings = self.settings.clone();
+
+            self.runtime.spawn(async move {
+                let checks = check_setup(&settings).await;
+                let _ = errand.send(Errand::Checks(checks));
+                ctx.request_repaint();
+            });
+        }
+    }
+
+    /// Takes answers to what the settings page asked for.
+    fn pump_errands(&mut self) {
+        while let Ok(errand) = self.errands.try_recv() {
+            match errand {
+                Errand::Voices(Ok(voices)) => {
+                    tracing::info!(target: "ward::voice", voices = voices.len(), "voice list");
+                    self.page.voices = page::Options::Have(voices);
+                }
+                Errand::Voices(Err(why)) => {
+                    tracing::warn!(target: "ward::voice", error = %why, "no voice list");
+                    self.page.voices = page::Options::Refused(why);
+                }
+                Errand::Models(Ok(models)) => {
+                    self.page.models = page::Options::Have(models);
+                }
+                Errand::Models(Err(why)) => {
+                    tracing::warn!(target: "ward::model", error = %why, "no model list");
+                    self.page.models = page::Options::Refused(why);
+                }
+                Errand::Checks(checks) => {
+                    self.page.testing = false;
+                    self.page.checks = checks;
+                }
+            }
+        }
     }
 
     /// Takes whatever the listening thread has noticed since the last frame.
@@ -960,7 +1248,52 @@ impl eframe::App for Ward {
                 .request_repaint_after(std::time::Duration::from_millis(33));
         }
 
+        self.pump_errands();
+
         let need_key = matches!(self.screen, Screen::NeedKey { .. });
+
+        // A bar rather than a button tucked somewhere: settings is the second
+        // half of what this window is for, and a Commander whose microphone is
+        // wrong needs to reach it without hunting.
+        if !need_key {
+            egui::Panel::top("where").show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(!self.settings_open, "Conversation")
+                        .clicked()
+                    {
+                        self.settings_open = false;
+                    }
+
+                    if ui
+                        .selectable_label(self.settings_open, "Settings")
+                        .clicked()
+                    {
+                        // Read from the settings again on the way in, so a box
+                        // left half-typed last time does not come back.
+                        self.page.reread();
+                        self.settings_open = true;
+                    }
+
+                    if self.settings.changed() > 0 {
+                        ui.weak(format!("{} changed", self.settings.changed()));
+                    }
+                });
+                ui.add_space(4.0);
+            });
+        }
+
+        if self.settings_open && !need_key {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let stored = self.client.is_some();
+                let mut settings = self.settings.clone();
+                let wants = self.page.show(ui, &mut settings, stored);
+                self.settings = settings;
+                self.apply(wants, ui.ctx());
+            });
+            return;
+        }
 
         // Beside the conversation rather than inside it. What Ward is holding
         // for the Commander is standing state, and standing state scrolling

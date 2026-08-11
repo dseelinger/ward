@@ -35,6 +35,21 @@ use crate::journal::Record;
 /// Elite's name for the action that fires what is selected.
 const ACTION: &str = "PrimaryFire";
 
+/// Protected, and this is the clearest case for it in Ward today. The model
+/// reads text nobody vetted, and this setting decides whether Ward presses a
+/// fire key on its own. Whatever the model can switch on, something written
+/// into a reply can switch on.
+pub static SETTINGS: &[crate::schema::Row] = &[crate::schema::Row {
+    key: "auto honk",
+    help: "Fire the discovery scanner when you arrive in a system. \
+           Needs primary fire bound to a key, not only to your stick.",
+    kind: crate::schema::Field::Flag,
+    card: "Flying",
+    doc: Some("capabilities/honk.md"),
+    protected: true,
+    default: || serde_json::json!(false),
+}];
+
 #[derive(Default)]
 struct State {
     /// Where the last honk happened, so arriving somewhere does not fire twice
@@ -129,6 +144,10 @@ impl Capability for Honk {
         // Nothing to say. This capability is never asked for, which is the
         // point of it.
         &[]
+    }
+
+    fn settings(&self) -> &'static [crate::schema::Row] {
+        SETTINGS
     }
 
     /// None, and deliberately. A capability that reacts to the game rather than

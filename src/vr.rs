@@ -268,6 +268,12 @@ impl Vr {
         };
 
         let mut counts = [0usize; 5];
+        // Why each controller was passed over, which is the part that names the fix. A connected
+        // controller that is not tracking is one asleep on a desk. A tracking controller whose
+        // buttons cannot be read is SteamVR declining the legacy input API, and no amount of
+        // squeezing will change that.
+        let mut untracked = 0usize;
+        let mut unreadable = 0usize;
 
         for (index, pose) in self.poses_raw().iter().enumerate() {
             if !pose.bDeviceIsConnected {
@@ -278,12 +284,38 @@ impl Vr {
                 clippy::cast_possible_truncation,
                 reason = "the array is 64 long and indexed by a u32 everywhere in OpenVR"
             )]
-            let class = unsafe { class_of(index as u32) };
+            let index = index as u32;
+            let class = unsafe { class_of(index) };
 
-            if let Ok(class) = usize::try_from(class)
-                && class < counts.len()
+            if let Ok(slot) = usize::try_from(class)
+                && slot < counts.len()
             {
-                counts[class] += 1;
+                counts[slot] += 1;
+            }
+
+            if class != sys::ETrackedDeviceClass_TrackedDeviceClass_Controller {
+                continue;
+            }
+
+            if !pose.bPoseIsValid {
+                untracked += 1;
+                continue;
+            }
+
+            let Some(state_of) = self.system.GetControllerState else {
+                unreadable += 1;
+                continue;
+            };
+
+            let mut state = sys::VRControllerState_t::default();
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the struct is far smaller than a u32 can count"
+            )]
+            let size = std::mem::size_of::<sys::VRControllerState_t>() as u32;
+
+            if !unsafe { state_of(index, &raw mut state, size) } {
+                unreadable += 1;
             }
         }
 
@@ -295,12 +327,20 @@ impl Vr {
             "base station",
         ];
 
-        let seen: Vec<String> = counts
+        let mut seen: Vec<String> = counts
             .iter()
             .enumerate()
             .filter(|(_, count)| **count > 0)
             .map(|(class, count)| format!("{count} {}", named[class]))
             .collect();
+
+        if untracked > 0 {
+            seen.push(format!("{untracked} not tracking"));
+        }
+
+        if unreadable > 0 {
+            seen.push(format!("{unreadable} refusing to report buttons"));
+        }
 
         match seen.is_empty() {
             true => "nothing connected".to_string(),

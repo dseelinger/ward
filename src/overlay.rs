@@ -301,6 +301,8 @@ struct Panel {
     /// Whether SteamVR's keyboard is up, so it is asked for once rather than every frame a text
     /// box has focus.
     typing: bool,
+    /// Whether anything typed has ever arrived, said once and never with what.
+    typed_anything: bool,
     /// Whether any controller has ever been seen, said once. A grab that does nothing is otherwise
     /// indistinguishable from a grab that was not noticed, and the difference is the whole
     /// diagnosis.
@@ -426,7 +428,17 @@ impl Panel {
                     art.press(down);
                 }
                 crate::vr::Event::Scrolled { x, y } => art.scroll(x, y),
-                crate::vr::Event::Typed(text) => art.typed(&text),
+                crate::vr::Event::Typed(text) => {
+                    // Said once per keyboard, and never with what was typed. The API key goes
+                    // through this exact path, so the only safe thing to record is that the round
+                    // trip closed at all - which is the whole question anyway.
+                    if !self.typed_anything {
+                        tracing::info!(target: "ward::vr", "typing is reaching the panel");
+                        self.typed_anything = true;
+                    }
+
+                    art.typed(&text);
+                }
                 crate::vr::Event::DoneTyping => self.typing = false,
                 crate::vr::Event::Left => {
                     art.point_at(None);

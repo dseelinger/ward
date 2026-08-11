@@ -139,7 +139,14 @@ jobs:
           # location rather than under Program Files.
           Write-Host "Installed to $installed"
 
-          $reported = & $installed --version
+          # Redirected to a file rather than captured from a pipe. A released
+          # build is a windowed program: run without redirection it has no
+          # usable stdout at all, and what comes back is empty.
+          $said = Join-Path $env:RUNNER_TEMP "installed-version.txt"
+          Start-Process -FilePath $installed -ArgumentList "--version" `
+            -Wait -NoNewWindow -RedirectStandardOutput $said
+
+          $reported = (Get-Content $said -Raw).Trim()
           Write-Host "installed binary reports: $reported"
           if ($reported -ne "Ward ${{ steps.version.outputs.version }}") {
             Write-Error "The installed binary is not the one that was built."

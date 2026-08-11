@@ -51,7 +51,13 @@ fn main() -> eframe::Result<()> {
     // meant to build. A version that needs a window open to read is a version
     // nothing can assert on.
     if std::env::args().any(|argument| argument == "--version") {
-        println!("Ward {}", env!("CARGO_PKG_VERSION"));
+        // Written rather than printed, and a failure to write is ignored. A
+        // released build is a windowed program with no console of its own, so
+        // there may be nothing on the other end of stdout at all - and `println`
+        // panics when it cannot write. Crashing while being asked what version
+        // you are is a worse answer than saying nothing.
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), "Ward {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 

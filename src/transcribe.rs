@@ -248,6 +248,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs the speech model and reaches the live voice service"]
     async fn ward_reads_back_a_sentence_it_spoke() {
+        let _outside = crate::outside::deliberately();
+
         use rodio::Source;
 
         let said = "What is my jump range, Ward?";

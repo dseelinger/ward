@@ -79,6 +79,8 @@ pub enum Event {
 /// nothing in tokens, which is also what makes it the honest way to find out
 /// whether a key works at all.
 pub async fn models(api_key: &str) -> Result<Vec<String>, String> {
+    crate::outside::going_out("the model service");
+
     let response = reqwest::Client::new()
         .get(format!("{CATALOG}?limit=100"))
         .header("x-api-key", api_key)
@@ -197,6 +199,8 @@ impl Client {
         situation: &str,
         out: &UnboundedSender<Event>,
     ) -> Result<()> {
+        crate::outside::going_out("the model service");
+
         let started = std::time::Instant::now();
 
         let mut wire: Vec<WireMessage> = history

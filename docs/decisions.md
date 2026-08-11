@@ -381,9 +381,13 @@ loop that reaches a live provider spends money while nobody is watching.
 Coverage floors per tier, measured rather than specified. A release gate that
 installs the built program, launches it and asserts it survives.
 
-> open — none of the three exists. Nothing currently stops a test reaching a
-> live service. [#124](https://github.com/dseelinger/ward/issues/124) and
-> [#123](https://github.com/dseelinger/ward/issues/123)
+> open — the first is built. Every call that leaves the process says so first,
+> and a test that has not asked for permission fails on it, with the wiring at
+> each call site tested rather than only the mechanism. Two of the four things
+> that bullet asks for do not apply here: no test redirects the data folder,
+> and there is no mock-mode variable to clear. The coverage floors and the
+> release gate are [#123](https://github.com/dseelinger/ward/issues/123) and
+> [#125](https://github.com/dseelinger/ward/issues/125).
 
 ## D39 — Everything writable in one folder beside the program
 

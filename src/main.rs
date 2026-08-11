@@ -24,6 +24,7 @@ mod honk;
 mod journal;
 mod listen;
 mod mic;
+mod outside;
 mod overlay;
 mod page;
 mod press;

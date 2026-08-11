@@ -165,6 +165,8 @@ impl Voice {
 /// rather than a name typed from memory. Fetched rather than compiled in: the
 /// list changes, and a stale list offers voices that no longer answer.
 pub async fn voices() -> Result<Vec<Voice>> {
+    crate::outside::going_out("the voice service");
+
     let url = format!(
         "https://{HOST}/consumer/speech/synthesize/readaloud/voices/list\
          ?trustedclienttoken={TOKEN}"
@@ -477,6 +479,8 @@ pub fn speakers() -> Result<String> {
 /// thing Ward does that takes as long as it takes, and hurrying the caller
 /// along would only mean starting the next line over the top of this one.
 pub fn play(audio: Vec<u8>, playing: &Playing) -> Result<()> {
+    crate::outside::going_out("the speakers");
+
     let device = rodio::DeviceSinkBuilder::open_default_sink().context("no audio output device")?;
 
     let player = std::sync::Arc::new(
@@ -503,6 +507,8 @@ pub fn play(audio: Vec<u8>, playing: &Playing) -> Result<()> {
 
 /// Turns text into speech, or explains why it could not.
 pub async fn synthesize(text: &str, voice: &str, rate: &str) -> Result<Speech> {
+    crate::outside::going_out("the voice service");
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -703,6 +709,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "reaches the live voice service"]
     async fn the_live_service_returns_speech() {
+        let _outside = crate::outside::deliberately();
+
         let speech = synthesize("Ward is speaking.", DEFAULT_VOICE, "+0%")
             .await
             .expect("synthesis failed");
@@ -728,6 +736,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs an audio device and somebody listening"]
     async fn ward_can_be_heard() {
+        let _outside = crate::outside::deliberately();
+
         let speech = synthesize(
             "Issue six has landed. I can speak now, through my own voice, not a script.              Nothing needed from you. Carrying on with seven through ten.",
             DEFAULT_VOICE,
@@ -947,6 +957,8 @@ mod tests {
     #[test]
     #[ignore = "opens the real audio device"]
     fn how_long_does_it_take_to_start_making_a_noise() {
+        let _outside = crate::outside::deliberately();
+
         for attempt in 1..=3 {
             let began = std::time::Instant::now();
             let device = rodio::DeviceSinkBuilder::open_default_sink();

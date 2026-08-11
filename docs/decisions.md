@@ -405,8 +405,11 @@ own state, which is where first-run problems hide.
 Lint, compile and the cheap tiers on a pull request. The install and upgrade
 gates on a release, because a pull request cannot ship a broken upgrade.
 
-> open — the quick half runs. The release half does not exist.
-> [#125](https://github.com/dseelinger/ward/issues/125)
+> enforced — `.github/workflows/check.yml` on every change, and
+> `.github/workflows/gate.yml` on a release. The gate lives in a workflow of its
+> own so it can be run against any branch without publishing anything, which is
+> what let it be exercised before it ever guarded a release — and its first run
+> found that the release build had not linked for seven hours.
 
 ## D41 — The upgrade is tested synthetically
 
@@ -414,7 +417,11 @@ A folder with a marker file in it, the installer run over it, the marker
 asserted to have survived. Seconds, and it tests the mechanism that actually
 breaks.
 
-> open — [#125](https://github.com/dseelinger/ward/issues/125)
+> enforced — `.github/workflows/gate.yml`, which installs, writes a settings
+> file, installs over the top and asserts the file is there with the same
+> contents. Contents rather than existence, because a preserved folder with a
+> replaced file is the likelier failure and an existence check would call that a
+> pass. Watched failing, on the real gate, with everything before it passing.
 
 ## D42 — Updates come from releases, with nothing to run
 

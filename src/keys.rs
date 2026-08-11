@@ -257,3 +257,147 @@ mod tests {
         assert!(!keyboard.primed);
     }
 }
+
+/// Taking the keyboard away from whatever else is in front, while a box is being typed into.
+///
+/// A low-level hook is the only thing on Windows that can stop a key reaching the application with
+/// focus. It is installed while a panel text box has focus and removed the moment one does not, so
+/// Ward is in the keyboard's path for exactly as long as somebody is typing at it and no longer.
+///
+/// # What is never taken
+///
+/// The push-to-talk key and the key that summons the panel always pass through, and so does
+/// anything held with control or alt. A Commander who cannot talk to Ward or dismiss its panel
+/// because a text box has focus is trapped by the very thing meant to be helping them, and that is
+/// a worse outcome than a stray letter reaching the game.
+///
+/// # Why its own thread
+///
+/// The hook is called on the thread that installed it, and that thread must be pumping messages.
+/// Windows gives the callback a few hundred milliseconds before it silently removes the hook, and
+/// every keystroke on the machine waits on it in the meantime — so it cannot live on a thread that
+/// also draws a frame or waits on a lock. This one does nothing else at all.
+///
+/// The timeout is worth knowing about the right way round: when this goes wrong, Windows takes the
+/// hook away and keys flow normally again. The failure is Ward stopping, not the keyboard sticking.
+pub mod steal {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_MENU};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, DispatchMessageW, GetMessageW, KBDLLHOOKSTRUCT, MSG, SetWindowsHookExW,
+        TranslateMessage, WH_KEYBOARD_LL,
+    };
+
+    /// Whether keys are currently being taken.
+    ///
+    /// Read by the hook and written by the overlay, which is why it is an atomic rather than
+    /// anything that could block: the hook runs on every keystroke on the machine and must never
+    /// wait for a lock somebody else is holding.
+    static TAKING: AtomicBool = AtomicBool::new(false);
+
+    /// The two keys that are never taken, however they are set.
+    ///
+    /// Held as numbers rather than names because the hook cannot read a settings file, and as
+    /// atomics for the same reason `TAKING` is one.
+    static SPARE_ONE: AtomicU32 = AtomicU32::new(0);
+    static SPARE_TWO: AtomicU32 = AtomicU32::new(0);
+
+    /// Starts the thread the hook lives on. Called once.
+    pub fn start() {
+        let started = std::thread::Builder::new()
+            .name("ward-keyboard".to_string())
+            .spawn(pump);
+
+        if let Err(e) = started {
+            tracing::warn!(
+                target: "ward::keys",
+                error = %e,
+                "the keyboard cannot be taken from the game, and typing will reach both"
+            );
+        }
+    }
+
+    /// Which keys must always reach whatever else is listening.
+    pub fn spare(keys: [u16; 2]) {
+        SPARE_ONE.store(u32::from(keys[0]), Ordering::Relaxed);
+        SPARE_TWO.store(u32::from(keys[1]), Ordering::Relaxed);
+    }
+
+    /// Whether to take keys from now on.
+    pub fn taking(now: bool) {
+        // Swapped rather than stored, so the change is logged once rather than every frame.
+        if TAKING.swap(now, Ordering::Relaxed) != now {
+            tracing::info!(target: "ward::keys", taking = now, "keyboard");
+        }
+    }
+
+    /// Installs the hook and does nothing else, forever.
+    ///
+    /// The message loop is not decoration. A low-level hook is delivered to the thread that
+    /// installed it by posting to its queue, so a thread that never pumps is a hook that is never
+    /// called — and Windows removes it after the timeout, which reads as the feature simply not
+    /// working.
+    fn pump() {
+        let hook =
+            unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(watch), std::ptr::null_mut(), 0) };
+
+        if hook.is_null() {
+            tracing::warn!(
+                target: "ward::keys",
+                "Windows refused the keyboard hook, so typing will reach the game as well"
+            );
+            return;
+        }
+
+        tracing::info!(target: "ward::keys", "keyboard hook installed");
+
+        let mut message = MSG::default();
+
+        // Runs until the process ends. There is no path that removes the hook, because the only
+        // reason to remove it is Ward closing - and closing takes the thread with it.
+        while unsafe { GetMessageW(&raw mut message, std::ptr::null_mut(), 0, 0) } > 0 {
+            unsafe {
+                let _ = TranslateMessage(&raw const message);
+                DispatchMessageW(&raw const message);
+            }
+        }
+    }
+
+    /// Called for every key on the machine. Returns non-zero to swallow one.
+    ///
+    /// Everything here is a comparison against an atomic. Nothing allocates, nothing locks and
+    /// nothing waits, because whatever this does is done between the Commander pressing a key and
+    /// anything at all seeing it.
+    unsafe extern "system" fn watch(code: i32, what: WPARAM, data: LPARAM) -> LRESULT {
+        // Negative means Windows is asking to be left alone, and the documented answer is to pass
+        // it straight on without looking at it.
+        if code < 0 || !TAKING.load(Ordering::Relaxed) {
+            return unsafe { CallNextHookEx(std::ptr::null_mut(), code, what, data) };
+        }
+
+        // SAFETY: for a keyboard hook with a non-negative code, Windows documents the pointer as a
+        // `KBDLLHOOKSTRUCT` that is valid for the duration of this call.
+        let key = unsafe { &*(data as *const KBDLLHOOKSTRUCT) };
+        let pressed = key.vkCode;
+
+        let spared = pressed == SPARE_ONE.load(Ordering::Relaxed)
+            || pressed == SPARE_TWO.load(Ordering::Relaxed);
+
+        // A modifier held is a shortcut rather than a letter, and a shortcut belongs to whatever
+        // has focus. Alt-tab and control-anything keep working while a box is being typed into.
+        let held = |key: u16| unsafe {
+            windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(key))
+        } as u16
+            & 0x8000
+            != 0;
+
+        if spared || held(VK_CONTROL) || held(VK_MENU) {
+            return unsafe { CallNextHookEx(std::ptr::null_mut(), code, what, data) };
+        }
+
+        // Taken. Nothing else on the machine sees this key.
+        1
+    }
+}

@@ -37,7 +37,7 @@ tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "json", "env-filter", "registry", "time"] }
 whisper-rs = { version = "0.16.0", default-features = false, features = ["tracing_backend"] }
 wgpu = "30.0.0"
-windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 # Ward's release builds compiled the speech model's C++ with the optimizer off,
 # and this turns it back on.
 #

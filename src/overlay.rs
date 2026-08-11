@@ -436,7 +436,18 @@ impl Panel {
         // The real keyboard first. It is read whether or not SteamVR's own is up, because a
         // Commander at a desk with a headset on still has hands and a keyboard in front of them,
         // and that is a shorter route to a folder path than picking the letters off a panel.
-        let typed = self.keyboard.typed(art.wants_typing());
+        // Taken from the game only while something is actually being typed into, and given back
+        // the instant it is not. The two keys that work Ward itself are never taken, or a text box
+        // with focus would be a box the Commander cannot talk or press their way out of.
+        let wants = art.wants_typing();
+
+        crate::keys::steal::spare([
+            crate::listen::PushToTalk::key_for(&view.settings.string("push to talk key")),
+            crate::listen::PushToTalk::key_for(&view.settings.string("panel key")),
+        ]);
+        crate::keys::steal::taking(wants);
+
+        let typed = self.keyboard.typed(wants);
 
         if !typed.is_empty() {
             if !self.typed_anything {

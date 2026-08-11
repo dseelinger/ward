@@ -184,23 +184,11 @@ fn serve(
     captions: &Arc<Mutex<Captions>>,
     engine: &Handle,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // One device for both layers, and that is a correctness requirement rather than a saving.
-    // OpenVR keeps its Vulkan state per process, so two devices submitting to the compositor
-    // corrupts it - which showed up as an access violation inside `vrclient_x64.dll` the first
-    // time a caption appeared while the panel was up.
-    let gpu = std::sync::Arc::new(crate::render::Gpu::new()?);
-
-    let mut caption_art = crate::render::Renderer::new(&gpu, PIXELS.0, PIXELS.1);
-    let mut panel_art = crate::render::Renderer::new(&gpu, PANEL_PIXELS.0, PANEL_PIXELS.1);
-
-    tracing::info!(
-        target: "ward::vr",
-        adapter = %gpu.adapter_info().name,
-        "drawing captions and the panel"
-    );
-
-    // The key is what SteamVR knows an overlay by, and a second copy of Ward claiming it is how we
-    // learn one is already running.
+    // The overlays first, and the reason is what this loop does when it fails. The key is what
+    // SteamVR knows an overlay by, and a second copy of Ward claiming it is how we learn one is
+    // already running - which is a thing that stays true for as long as that copy lives. Claiming
+    // the key after building a Vulkan device and two renderers meant every five second retry
+    // brought a device up and tore it down to find out something it could have asked first.
     let caption_layer = session.create_overlay("dev.ward.captions", "Ward captions")?;
 
     caption_layer.set_width(WIDTH)?;
@@ -213,6 +201,21 @@ fn serve(
     // pixels and the two modes are drawn at different sizes.
     let panel_layer = session.create_overlay("dev.ward.panel", "Ward")?;
     panel_layer.hide()?;
+
+    // Only once both keys are ours. One device for both layers, and that is a correctness
+    // requirement rather than a saving: OpenVR keeps its Vulkan state per process, so two devices
+    // submitting to the compositor corrupts it - which showed up as an access violation inside
+    // `vrclient_x64.dll` the first time a caption appeared while the panel was up.
+    let gpu = std::sync::Arc::new(crate::render::Gpu::new()?);
+
+    let mut caption_art = crate::render::Renderer::new(&gpu, PIXELS.0, PIXELS.1);
+    let mut panel_art = crate::render::Renderer::new(&gpu, PANEL_PIXELS.0, PANEL_PIXELS.1);
+
+    tracing::info!(
+        target: "ward::vr",
+        adapter = %gpu.adapter_info().name,
+        "drawing captions and the panel"
+    );
 
     let mut showing_caption = false;
     let mut panel = Panel::default();

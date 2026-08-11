@@ -81,6 +81,19 @@ jobs:
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
           CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
+          # Without this the line above does nothing at all.
+          #
+          # Choosing the C runtime through that variable is behavior CMake
+          # gates behind a policy, and a project declaring an older minimum
+          # gets the old behavior - which is to ignore the variable silently
+          # and use the dynamic runtime. Nothing warns. The build succeeds and
+          # the link fails afterwards with fifteen unresolved symbols, all of
+          # them prefixed to say they wanted a DLL.
+          #
+          # The two settings are one setting. Neither is any use alone, and the
+          # one that looks like it is doing the work is the one that does
+          # nothing without the other.
+          CMAKE_POLICY_DEFAULT_CMP0091: NEW
         run: cargo build --release
 
       # The binary is asked what it is rather than trusted to be what the build

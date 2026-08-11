@@ -145,6 +145,62 @@ else
     fi
 fi
 
+# --- the documentation ---------------------------------------------------------
+#
+# Two checks, both cheap and both static.
+#
+# The first is that every page under docs/ is in the summary. The builder only
+# builds what the summary lists, which is the whole reason for choosing it: a
+# page that is not listed is not published and cannot be stumbled into. The
+# hazard that leaves is the opposite one - a page somebody wrote, meant to
+# publish, and which silently is not there.
+#
+# The second is that every capability page quotes something real: at least one
+# code block. It is a mechanical proxy for a rule a check cannot see, which is
+# that a page is written from artifacts rather than from the feature name. A
+# page that cannot cite a setting, a line of output or a real value is a page
+# written from the idea of the feature, and those are the ones that turn out to
+# describe something the code does not do.
+
+echo "==> the documentation"
+
+DOCS="docs"
+SUMMARY="$DOCS/SUMMARY.md"
+
+if [ ! -f "$SUMMARY" ]; then
+    echo "    FAIL: no summary at $SUMMARY" >&2
+    status=1
+else
+    for page in $(find "$DOCS" -name '*.md' ! -name 'SUMMARY.md' | sed "s|^$DOCS/||" | sort); do
+        if ! grep -qF "($page)" "$SUMMARY"; then
+            echo "    FAIL: $DOCS/$page is not in the summary, so nothing publishes it" >&2
+            status=1
+        fi
+    done
+
+    # And the other direction: a summary naming a page that is not there builds
+    # a link to nothing.
+    for linked in $(grep -oE '\]\([^)]+\.md\)' "$SUMMARY" | tr -d '](' | tr -d ')'); do
+        if [ ! -f "$DOCS/$linked" ]; then
+            echo "    FAIL: the summary names $linked, which does not exist" >&2
+            status=1
+        fi
+    done
+fi
+
+for page in "$DOCS"/capabilities/*.md; do
+    [ -e "$page" ] || continue
+
+    if ! grep -q '^```' "$page"; then
+        echo "    FAIL: $page quotes nothing real" >&2
+        echo "          every capability page needs at least one code block: a" >&2
+        echo "          setting, a line of output, something the code produces" >&2
+        status=1
+    fi
+done
+
+[ "$status" -eq 0 ] && echo "    ok"
+
 # --- the installer keeps the data folder --------------------------------------
 #
 # Everything the Commander owns lives in one folder beside the executable:

@@ -209,8 +209,12 @@ a capability that is not wired up fails a test rather than going unnoticed.
 Discoverable before install, which matters because other people are meant to
 use this.
 
-> open — the pages exist under `docs/`. Nothing publishes them, and the checker
-> that keeps internal pages out of a published site does not exist.
+> open — the site is built and checked on every change, and nothing publishes
+> it yet. Publishing is a repository setting the maintainer turns on, plus one
+> job. The checker that kept internal pages out of a published site is not
+> needed: the builder only builds what `docs/SUMMARY.md` lists, so a page that
+> is not listed cannot be served, and `check.sh` holds the opposite direction —
+> a page nothing lists, and a summary naming a page that is not there.
 > [#122](https://github.com/dseelinger/ward/issues/122)
 
 ## D22 — Pages are written, then edited, and never re-emitted
@@ -220,9 +224,14 @@ Four checks hold the prose to what the code actually does: every capability has
 a page, documented defaults match the schema, every page quotes something real,
 and the word lists apply.
 
-> open — two of the four are built: `every_capability_has_a_page` and
-> `documented_defaults_match_the_code`. Nothing yet requires a page to quote
-> anything real. [#122](https://github.com/dseelinger/ward/issues/122)
+> enforced — all four. `every_capability_has_a_page` and
+> `documented_defaults_match_the_code` in `cargo test`, the word lists in
+> `check.sh`, and every capability page must carry at least one code block —
+> which is a mechanical proxy for the rule a check cannot see, that a page is
+> written from artifacts rather than from the feature name. A page that cannot
+> cite a setting, a line of output or a real value is one written from the idea
+> of a feature, and those are the pages that describe something the code does
+> not do.
 
 ## D23 — What a capability declares, and what falls out of it
 

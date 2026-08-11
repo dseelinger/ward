@@ -3,3 +3,7 @@
 
 # Rust build output.
 /target/
+
+# The built documentation site. The pages are the source; this is what the
+# builder makes of them.
+/book/

@@ -85,6 +85,22 @@ jobs:
       - shell: bash
         run: sh check/coverage.sh
 
+  # The site is built and thrown away. Building it is the check: a summary
+  # naming a page that does not exist, or a page nothing links to, are both
+  # caught by check.sh, and this catches whatever is left - a link into a
+  # heading that moved, markup the builder refuses.
+  #
+  # Nothing is published. Turning that on is one job and one repository setting,
+  # and it is the maintainer's to turn on rather than something that starts
+  # happening because a file landed. See the notes on the docs issue for exactly
+  # what to add.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@mdbook
+      - run: mdbook build
+
   # Licenses are an allowlist: anything not named in deny.toml fails. This
   # reads dependency metadata rather than building, so it does not need Windows.
   licenses:

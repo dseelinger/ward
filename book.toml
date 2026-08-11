@@ -1,0 +1,28 @@
+# The documentation site.
+#
+# mdBook rather than anything heavier, for one structural reason beyond it being
+# Rust and needing no other toolchain: it builds only what SUMMARY.md lists. A
+# page that is in the folder and not in the summary is not built, not published
+# and not indexed.
+#
+# That matters because the failure it prevents has happened. Six internal
+# research pages and three proof-of-concept scripts were once built, sitemapped
+# and served publicly by a generator that swept the whole directory, and the
+# checker written afterwards had to reimplement the builder's own view of which
+# files existed in order to notice. Here there is nothing to reimplement: the
+# list is the build.
+
+[book]
+title = "Ward"
+description = "A voice companion for Elite Dangerous."
+src = "docs"
+language = "en"
+
+[output.html]
+# The repository, so a page can be corrected by whoever noticed.
+git-repository-url = "https://github.com/dseelinger/ward"
+edit-url-template = "https://github.com/dseelinger/ward/edit/main/{path}"
+no-section-label = true
+
+[output.html.search]
+enable = true

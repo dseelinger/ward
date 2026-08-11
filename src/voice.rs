@@ -43,6 +43,19 @@ pub struct Speech {
     pub audio: Vec<u8>,
 }
 
+impl Speech {
+    /// How long this takes to say.
+    ///
+    /// Worked out from the size, because the format is fixed and known: the
+    /// service is asked for mono at 48 kilobits a second, so the bytes are the
+    /// duration. Captions are paced by this rather than by an assumed reading
+    /// speed, which is the only way they can keep step with a voice whose pace
+    /// they cannot otherwise see.
+    pub fn duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(self.audio.len() as f64 * 8.0 / 48_000.0)
+    }
+}
+
 /// A token the service checks on every connection.
 ///
 /// The timestamp is deliberately rounded down to a five-minute boundary, so a

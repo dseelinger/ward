@@ -216,11 +216,21 @@ fn draw_caption(ui: &mut egui::Ui, caption: &crate::captions::Caption) {
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
         egui::Frame::new()
             .fill(BOX)
-            .inner_margin(egui::Margin::symmetric(14, 8))
+            .inner_margin(egui::Margin {
+                left: 14,
+                right: 14,
+                top: 2,
+                bottom: 2,
+            })
             .corner_radius(2)
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
+                    // No gap between the two lines of one caption, and no
+                    // padding above or below beyond a hair. A two line caption
+                    // was drawing a box nearly three lines tall, which over a
+                    // cockpit is a third more of the view blacked out than the
+                    // words needed.
+                    ui.spacing_mut().item_spacing.y = 0.0;
 
                     for (at, line) in caption.lines.iter().enumerate() {
                         // The speaker is named once, on the first line, and

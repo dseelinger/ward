@@ -616,13 +616,6 @@ impl Ward {
     /// spoke, but a companion that stops working because it could not speak is
     /// worse than both.
     fn say(&mut self, act: &Act, ctx: &egui::Context) {
-        // Into the headset before it is into the speaker. The caption is not a
-        // transcript of what was said; it is the same act, shown rather than
-        // spoken, and it appears when the act does.
-        if let Ok(mut captions) = self.captions.lock() {
-            captions.started(act, diag::since_start());
-        }
-
         let Body::Text(text) = &act.body else {
             return;
         };
@@ -633,6 +626,11 @@ impl Ward {
         let ctx = ctx.clone();
         let playing = self.playing.clone();
         let hush = self.hush.clone();
+        let captions = self.captions.clone();
+        let speaker = match act.speaker {
+            Speaker::Ward => None,
+            Speaker::System => Some("Ward"),
+        };
 
         let (tx, rx) = unbounded_channel();
         self.spoken = Some(rx);
@@ -667,6 +665,21 @@ impl Ward {
 
                 match voice::synthesize(piece, &voice, &rate).await {
                     Ok(speech) => {
+                        // The captions for this piece, told how long the voice
+                        // will take over it. Handed over here rather than from
+                        // the window, because the window is not painted while
+                        // Ward is minimized - which in a headset is most of the
+                        // time, and a caption clock that stops there is one that
+                        // leaves a caption on screen forever.
+                        if let Ok(mut captions) = captions.lock() {
+                            captions.speaking(
+                                piece,
+                                speaker,
+                                speech.duration(),
+                                diag::since_start(),
+                            );
+                        }
+
                         if first_audio.is_none() {
                             let ms = started.elapsed().as_millis() as u64;
                             first_audio = Some(ms);
@@ -703,6 +716,10 @@ impl Ward {
             // Commander holding the key and being ignored for the rest of the
             // session.
             hush.stopped(diag::since_start());
+
+            if let Ok(mut captions) = captions.lock() {
+                captions.finished(diag::since_start());
+            }
 
             tracing::info!(
                 target: "ward::voice",
@@ -1354,13 +1371,6 @@ impl eframe::App for Ward {
         // Speaking finished, so the stream may move on.
         if self.spoken.as_mut().is_some_and(|rx| rx.try_recv().is_ok()) {
             self.spoken = None;
-
-            // The caption holds from here, not from when Ward started talking.
-            // Timed from the start, a long reply clears itself off the headset
-            // while the voice is still saying it.
-            if let Ok(mut captions) = self.captions.lock() {
-                captions.finished(now);
-            }
 
             self.speech.finished();
         }

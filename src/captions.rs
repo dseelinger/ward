@@ -13,7 +13,6 @@
 //!
 //! - **42 characters per line**, and **two lines at most**. One line is
 //!   preferred, and a second is used only when the first will not hold the text.
-//! - **20 characters per second** of reading speed for an adult audience.
 //! - **Five sixths of a second minimum** and **seven seconds maximum** for any
 //!   one caption.
 //! - When two lines are needed, prefer a bottom-heavy shape, and never leave one
@@ -23,29 +22,21 @@
 //! what subtitling has always done. It is not a wall of text that stands there
 //! until it times out.
 //!
-//! **Timed from when speaking ends, not when it starts.** A caption whose clock
-//! starts at the first word disappears while the voice is still talking, which
-//! is precisely the failure this exists to prevent: the Commander looks up to
-//! read what they just heard and it has already gone.
+//! **Paced by the audio, never by a clock of its own.** Each caption is shown
+//! when the speech it belongs to starts playing, and the captions within one
+//! piece of speech divide that piece's real duration between them by length.
+//! Reading speed was the first attempt and it ran away from the voice inside a
+//! sentence: a guess cannot see how fast the speaker is going, and knows nothing
+//! of the pauses while the next piece is being fetched.
 
 use std::collections::VecDeque;
 use std::time::Duration;
-
-use crate::speech::{Act, Body, Speaker};
 
 /// The most characters on one line.
 const PER_LINE: usize = 42;
 
 /// The most lines in one caption.
 const LINES: usize = 2;
-
-/// How fast a caption is read, in characters per second.
-///
-/// Netflix's figure for an adult audience. Ward paces captions a little slower
-/// than this rather than faster, because the Commander is flying rather than
-/// watching, and a caption that has gone before it was noticed may as well not
-/// have appeared.
-const READING: f32 = 16.0;
 
 /// Nothing is on screen for less than this, however short it is.
 const AT_LEAST: Duration = Duration::from_millis(833);
@@ -70,13 +61,8 @@ pub struct Caption {
 }
 
 impl Caption {
-    fn characters(&self) -> usize {
+    pub fn characters(&self) -> usize {
         self.lines.iter().map(|line| line.chars().count()).sum()
-    }
-
-    /// How long this stays up, from its length.
-    fn on_screen(&self) -> Duration {
-        Duration::from_secs_f32(self.characters() as f32 / READING).clamp(AT_LEAST, AT_MOST)
     }
 }
 
@@ -236,78 +222,91 @@ pub fn into_captions(text: &str, speaker: Option<&'static str>) -> Vec<Caption> 
 }
 
 /// What is on screen, and what is queued to be.
+///
+/// **Paced by the audio, not by a clock.** The first version guessed at how
+/// long each caption should hold from a reading speed, and it ran away from the
+/// voice within a sentence — the guess was never going to match a speaker whose
+/// pace it could not see, and the gaps while the next piece of speech was being
+/// fetched were not in the guess at all.
+///
+/// Now each caption is shown when the audio it belongs to starts playing, and
+/// the captions within one piece of speech divide that piece's real duration
+/// between them by length. The voice cannot drift from the captions because the
+/// captions are told how long the voice will take.
 #[derive(Default)]
 pub struct Captions {
-    waiting: VecDeque<Caption>,
+    waiting: VecDeque<(Caption, Duration)>,
     showing: Option<Caption>,
-    /// When the caption on screen makes way for the next one, or nothing while
-    /// the voice is still speaking and the last caption is up.
+    /// When the caption on screen makes way for the next, or for nothing.
     until: Option<Duration>,
-    /// Whether the voice has stopped. Until it has, the last caption holds.
-    speaking: bool,
 }
 
 impl Captions {
-    /// Something started being said.
+    /// A piece of speech has started playing, and takes `audio` to say.
     ///
     /// Cues put nothing on screen: a caption reading "listening chirp" helps
     /// nobody, and the sound is its own announcement.
-    pub fn started(&mut self, act: &Act, now: Duration) {
-        let Body::Text(text) = &act.body else {
-            return;
-        };
-
-        let speaker = match act.speaker {
-            Speaker::Ward => None,
-            Speaker::System => Some("Ward"),
-        };
-
+    pub fn speaking(
+        &mut self,
+        text: &str,
+        speaker: Option<&'static str>,
+        audio: Duration,
+        now: Duration,
+    ) {
         let captions = into_captions(text, speaker);
 
         if captions.is_empty() {
             return;
         }
 
-        // A new utterance replaces the old one rather than queueing behind it.
-        // Ward only speaks one thing at a time, so anything still on screen
-        // belongs to something that has stopped being said.
-        self.waiting = captions.into();
-        self.showing = None;
-        self.until = None;
-        self.speaking = true;
+        // Split the piece's real duration between its captions by how much of
+        // the text each one holds. A caption with twice the words is on screen
+        // twice as long, which is what the voice is doing with them.
+        let total: usize = captions
+            .iter()
+            .map(Caption::characters)
+            .sum::<usize>()
+            .max(1);
+
+        self.waiting = captions
+            .into_iter()
+            .map(|caption| {
+                let share = caption.characters() as f64 / total as f64;
+                (caption, audio.mul_f64(share))
+            })
+            .collect();
 
         self.advance(now);
     }
 
-    /// The voice has stopped, so the last caption is on a clock now.
+    /// The voice has stopped, whether it finished or was cut off.
+    ///
+    /// Called from the thread that plays the audio rather than from the window,
+    /// deliberately. The window is not painted while it is minimized, and a
+    /// caption whose clock lives there is one that stays on screen forever the
+    /// moment the Commander puts Ward out of the way — which is most of the time
+    /// in a headset.
     pub fn finished(&mut self, now: Duration) {
-        self.speaking = false;
+        self.waiting.clear();
 
-        // Only the caption still holding open. One that already has an expiry
-        // is paced by its own length and is not waiting on the voice.
-        if self.showing.is_some() && self.until.is_none() {
+        if self.showing.is_some() {
             self.until = Some(now + AFTER_SPEAKING);
         }
     }
 
-    /// Moves to the next caption, or clears the screen.
     fn advance(&mut self, now: Duration) {
-        self.showing = self.waiting.pop_front();
-
-        // The last caption of an utterance has no expiry while the voice is
-        // still on it, because the voice is what it is captioning. Everything
-        // before it is paced by its own length.
-        //
-        // Held is spelled as *no* expiry rather than as one far in the future,
-        // and the difference is not cosmetic: the voice stopping has to be able
-        // to tell a caption that is waiting for it from one that is simply
-        // long, and a distant expiry looks like the second.
-        self.until = self.showing.as_ref().and_then(|caption| {
-            match self.waiting.is_empty() && self.speaking {
-                true => None,
-                false => Some(now + caption.on_screen()),
+        match self.waiting.pop_front() {
+            Some((caption, holds)) => {
+                self.showing = Some(caption);
+                // Never off screen faster than it can be read, and never left
+                // up beyond what the standard allows however long the audio is.
+                self.until = Some(now + holds.clamp(AT_LEAST, AT_MOST));
             }
-        });
+            None => {
+                self.showing = None;
+                self.until = None;
+            }
+        }
     }
 
     /// Advances the screen to whatever should be on it now.
@@ -330,14 +329,9 @@ impl Captions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::speech::Register;
 
     fn at(ms: u64) -> Duration {
         Duration::from_millis(ms)
-    }
-
-    fn said(text: &str) -> Act {
-        Act::text(Speaker::Ward, Register::Reply, text, at(0))
     }
 
     fn shown(captions: &Captions) -> Vec<String> {
@@ -366,8 +360,6 @@ mod tests {
 
     #[test]
     fn a_short_answer_is_one_line_and_not_two() {
-        // The guidance is explicit that one line is preferred and a second is
-        // used only when the first will not hold the text.
         let captions = into_captions("Forty two light years.", None);
         assert_eq!(captions.len(), 1);
         assert_eq!(captions[0].lines, vec!["Forty two light years."]);
@@ -375,12 +367,10 @@ mod tests {
 
     #[test]
     fn two_lines_are_bottom_heavy_rather_than_top_heavy() {
-        // Filling the first line and letting the rest fall onto the second is
-        // what strands one word on its own.
         let text = "You will need to refuel at least once on the way there, Commander.";
         let captions = into_captions(text, None);
 
-        assert_eq!(captions.len(), 1, "{:?}", captions);
+        assert_eq!(captions.len(), 1, "{captions:?}");
         let lines = &captions[0].lines;
         assert_eq!(lines.len(), 2);
         assert!(
@@ -390,89 +380,148 @@ mod tests {
     }
 
     #[test]
-    fn a_long_reply_becomes_several_captions_rather_than_a_wall() {
-        let long = "The Thargoids are an ancient alien species humanity first \
-                    clashed with centuries ago. They went dormant for a long time, \
-                    then began resurfacing a few years back, attacking outposts and \
-                    infesting systems across the bubble.";
+    fn one_long_sentence_is_broken_into_several_captions() {
+        let one = "The Thargoids are an ancient alien species that humanity first \
+                   clashed with centuries ago, went dormant for a very long time \
+                   afterwards, and then began resurfacing to attack outposts.";
 
-        let captions = into_captions(long, None);
-
-        assert!(captions.len() > 2, "got {} captions", captions.len());
-        assert!(captions.iter().all(|c| c.lines.len() <= LINES));
+        let captions = into_captions(one, None);
+        assert!(captions.len() > 1, "{captions:?}");
     }
 
     #[test]
-    fn no_caption_outstays_the_maximum() {
-        // Seven seconds is the ceiling for one caption, whatever it holds.
-        let caption = Caption {
-            lines: vec!["a".repeat(PER_LINE), "b".repeat(PER_LINE)],
-            speaker: None,
-        };
-        assert!(caption.on_screen() <= AT_MOST);
+    fn captions_are_paced_by_the_audio_rather_than_by_a_guess() {
+        // The fault this replaced: captions timed from an assumed reading speed
+        // ran away from the voice within a sentence, because the guess could
+        // not see how fast the speaker was going, and knew nothing of the gaps
+        // while the next piece of speech was being fetched.
+        let mut captions = Captions::default();
+
+        // Long enough to need more than one caption, or there is nothing for
+        // the pacing to get wrong.
+        let text = "The first quarter of what is being said here. \
+                    The second quarter of what is being said here. \
+                    The third quarter of what is being said here. \
+                    The fourth quarter of what is being said here.";
+
+        assert!(
+            into_captions(text, None).len() >= 2,
+            "a single caption cannot drift"
+        );
+
+        // The same words said quickly and said slowly. If the captions are
+        // paced by the audio then the second one is still on its first caption
+        // when the first one has moved on; if they are paced by anything else -
+        // a reading speed, a fixed interval - both behave identically and this
+        // is the assertion that says so.
+        captions.speaking(text, None, at(4000), at(0));
+        let first = shown(&captions);
+        assert!(!first.is_empty());
+
+        captions.tick(at(2500));
+        assert_ne!(
+            shown(&captions),
+            first,
+            "a quick line held as long as a slow one"
+        );
+
+        let mut slowly = Captions::default();
+        slowly.speaking(text, None, at(20_000), at(0));
+
+        assert_eq!(
+            shown(&slowly),
+            first,
+            "the two did not start in the same place"
+        );
+
+        slowly.tick(at(2500));
+        assert_eq!(
+            shown(&slowly),
+            first,
+            "it ran ahead of a voice that was taking its time"
+        );
     }
 
     #[test]
-    fn no_caption_flashes_past_faster_than_it_can_be_read() {
-        let caption = Caption {
+    fn a_longer_caption_takes_a_longer_share_of_the_audio() {
+        let short = Caption {
             lines: vec!["Yes.".to_string()],
             speaker: None,
         };
-        assert_eq!(caption.on_screen(), AT_LEAST);
+        let long = Caption {
+            lines: vec!["a".repeat(PER_LINE), "b".repeat(PER_LINE)],
+            speaker: None,
+        };
+
+        assert!(long.characters() > short.characters() * 10);
     }
 
     #[test]
-    fn the_last_caption_waits_for_the_voice_rather_than_the_clock() {
-        // The failure this prevents: a caption whose clock runs out disappears
-        // while Ward is still saying that sentence.
+    fn nothing_is_left_on_screen_when_the_voice_stops() {
+        // The caption layer used to be cleared by the window, which is not
+        // painted while Ward is minimized - so a caption stayed up forever the
+        // moment the Commander put Ward out of the way, which in a headset is
+        // most of the time.
         let mut captions = Captions::default();
-        captions.started(&said("Forty two light years."), at(0));
+        captions.speaking("Something Ward is saying.", None, at(60_000), at(0));
 
-        captions.tick(at(600_000));
+        assert!(captions.showing().is_some());
+
+        captions.finished(at(1000));
+        captions.tick(at(1000));
         assert!(
             captions.showing().is_some(),
-            "it vanished while Ward was still talking"
+            "it vanished the instant speech ended"
         );
 
-        captions.finished(at(600_000));
-        captions.tick(at(600_000));
-        assert!(
-            captions.showing().is_some(),
-            "it vanished the moment speech ended"
-        );
-
-        captions.tick(at(600_000) + AFTER_SPEAKING + at(1));
+        captions.tick(at(1000) + AFTER_SPEAKING + at(1));
         assert!(captions.showing().is_none(), "it never went away");
     }
 
     #[test]
-    fn earlier_captions_are_paced_by_their_own_length() {
-        // Only the last one waits on the voice. The ones before it have a
-        // sentence still to come, so they move on by themselves.
+    fn being_cut_off_drops_what_had_not_been_said_yet() {
+        // Barge-in. Whatever was queued belongs to a sentence that is no longer
+        // going to be spoken.
         let long = "The Thargoids are an ancient alien species humanity first \
-                    clashed with centuries ago, and they went dormant for a long \
-                    time before resurfacing.";
+                    clashed with centuries ago, and they went dormant for a very \
+                    long time before resurfacing across the bubble.";
 
         let mut captions = Captions::default();
-        captions.started(&said(long), at(0));
+        captions.speaking(long, None, at(20_000), at(0));
 
-        let first = shown(&captions);
-        assert!(!first.is_empty());
+        captions.finished(at(500));
+        captions.tick(at(500) + AFTER_SPEAKING + at(1));
 
-        captions.tick(at(0) + AT_MOST + at(1));
-        let second = shown(&captions);
-
-        assert_ne!(first, second, "it never moved on");
-        assert!(!second.is_empty(), "it went blank mid-utterance");
+        assert!(
+            captions.showing().is_none(),
+            "it carried on after being cut off"
+        );
     }
 
     #[test]
-    fn a_new_utterance_replaces_whatever_was_up() {
-        // Ward says one thing at a time, so anything still on screen belongs to
-        // something that has stopped being said.
+    fn no_caption_flashes_past_faster_than_it_can_be_read() {
         let mut captions = Captions::default();
-        captions.started(&said("The first thing entirely."), at(0));
-        captions.started(&said("The second thing."), at(1000));
+        captions.speaking("Yes. No. Maybe.", None, at(30), at(0));
+
+        let first = shown(&captions);
+        captions.tick(at(100));
+        assert_eq!(shown(&captions), first, "it flashed past");
+    }
+
+    #[test]
+    fn no_caption_outstays_the_maximum() {
+        let mut captions = Captions::default();
+        captions.speaking("Four words here now.", None, at(600_000), at(0));
+
+        captions.tick(AT_MOST + at(1));
+        assert!(captions.showing().is_none(), "it outstayed the ceiling");
+    }
+
+    #[test]
+    fn a_new_piece_of_speech_replaces_what_was_up() {
+        let mut captions = Captions::default();
+        captions.speaking("The first thing entirely.", None, at(5000), at(0));
+        captions.speaking("The second thing.", None, at(5000), at(1000));
 
         assert_eq!(shown(&captions), vec!["The second thing."]);
     }
@@ -480,21 +529,12 @@ mod tests {
     #[test]
     fn ward_is_unlabeled_and_anybody_else_is_named() {
         let mut captions = Captions::default();
-        captions.started(&said("forty two light years"), at(0));
+
+        captions.speaking("forty two light years", None, at(2000), at(0));
         assert_eq!(captions.showing().unwrap().speaker, None);
 
-        captions.started(
-            &Act::text(Speaker::System, Register::Alert, "no key stored", at(0)),
-            at(0),
-        );
+        captions.speaking("no key stored", Some("Ward"), at(2000), at(0));
         assert_eq!(captions.showing().unwrap().speaker, Some("Ward"));
-    }
-
-    #[test]
-    fn a_cue_puts_nothing_on_screen() {
-        let mut captions = Captions::default();
-        captions.started(&Act::cue("listening", at(0)), at(0));
-        assert!(captions.showing().is_none());
     }
 
     #[test]
@@ -507,8 +547,6 @@ mod tests {
 
     #[test]
     fn a_marker_that_is_not_markup_survives() {
-        // Ward's own tool names carry underscores, and a caption reading
-        // "checklistadd" disagrees with the voice that just said the name.
         assert_eq!(
             as_plain_text("Use `checklist_add` for that."),
             "Use checklist_add for that."
@@ -536,18 +574,14 @@ mod tests {
     }
 
     #[test]
-    fn a_line_with_nothing_left_in_it_is_not_shown() {
-        // Markup around nothing flattens to nothing, and an empty caption is a
-        // black box over the cockpit with no words in it.
+    fn nothing_but_markup_puts_nothing_on_screen() {
         let mut captions = Captions::default();
-        captions.started(&said("****"), at(0));
+        captions.speaking("****", None, at(1000), at(0));
         assert!(captions.showing().is_none());
     }
 
     #[test]
     fn a_word_longer_than_a_line_does_not_lose_the_rest_of_the_sentence() {
-        // Station and system names get long, and a name that cannot be broken
-        // must not swallow what follows it.
         let captions = into_captions(
             "Docking at Hutton-Orbital-Is-A-Very-Long-Name-Indeed-Really now.",
             None,

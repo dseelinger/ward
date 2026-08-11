@@ -14,9 +14,10 @@
 //! than Ward. Baking it in at authoring time is how a line ends up in the wrong
 //! mouth.
 //!
-//! Captions and the live log render off this stream rather than off the model's
-//! output, which is what keeps a caption on screen for exactly as long as
-//! something was being said.
+//! Captions render off this stream rather than off the model's output, which is
+//! what keeps a caption on screen for exactly as long as something was being
+//! said. Turning an act into caption lines is `captions`, and only there: the
+//! rule about who is named and who is not is one rule, so it is written once.
 
 //! Parts of the policy below have no caller in the application yet, and are
 //! marked rather than left as silent warnings. Ambient and callout registers
@@ -182,20 +183,6 @@ impl Act {
 
         let seconds = (0.06 * characters as f64).clamp(2.8, 10.0);
         Duration::from_secs_f64(seconds)
-    }
-
-    /// What a caption shows.
-    ///
-    /// Ward is unlabeled; anybody else is named. A caption is small and the
-    /// Commander already knows who the companion is.
-    pub fn caption(&self) -> Option<String> {
-        match &self.body {
-            Body::Cue(_) => None,
-            Body::Text(text) => Some(match self.speaker {
-                Speaker::Ward => text.clone(),
-                Speaker::System => format!("Ward: {text}"),
-            }),
-        }
     }
 }
 
@@ -494,21 +481,6 @@ mod tests {
             survived.contains(&Body::Text("the answer".into())),
             "the reply was dropped: {survived:?}"
         );
-    }
-
-    #[test]
-    fn ward_is_unlabeled_in_captions_and_anybody_else_is_named() {
-        let ward = reply("forty two light years", at(0));
-        assert_eq!(ward.caption().unwrap(), "forty two light years");
-
-        let system = Act::text(Speaker::System, Register::Alert, "no key stored", at(0));
-        assert_eq!(system.caption().unwrap(), "Ward: no key stored");
-    }
-
-    #[test]
-    fn a_cue_has_no_caption() {
-        // A caption reading "listening chirp" helps nobody.
-        assert!(Act::cue("listening", at(0)).caption().is_none());
     }
 
     #[test]

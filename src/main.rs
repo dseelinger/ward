@@ -1193,13 +1193,12 @@ impl Ward {
                     ui.colored_label(ui.visuals().error_fg_color, problem);
                 }
 
-                // The caption line comes off the speech stream rather than off
-                // the model's output, which is what will later keep a caption
-                // on screen for exactly as long as something is being said.
-                if let Some(caption) = self.speech.speaking().and_then(Act::caption) {
-                    ui.add_space(10.0);
-                    ui.weak(caption);
-                }
+                // No caption here. There used to be one, as proof that the
+                // speech stream reached a surface at all, and now that it
+                // reaches the headset it has a real home. On the desktop it was
+                // printing every reply a second time in a fainter color - the
+                // conversation is already on this window, and a caption of what
+                // is on the screen you are looking at is not a caption.
             });
     }
 }

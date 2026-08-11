@@ -159,6 +159,10 @@ fn run(captions: &Arc<Mutex<Captions>>, engine: &Handle) {
             tracing::warn!(target: "ward::vr", error = %e, "the headset layers stopped");
         }
 
+        // Whatever went wrong up there, the keyboard is not Ward's any more. Nothing below this
+        // draws a panel, so nothing below this has any business holding the Commander's keys.
+        crate::keys::steal::taking(false);
+
         // Dropping the session shuts OpenVR down, which is what makes going round again a fresh
         // start rather than a second init on a runtime that already has one.
         drop(session);
@@ -395,6 +399,12 @@ impl Panel {
                 self.applied_mode = None;
                 self.applied_place = None;
             }
+
+            // Before returning, and unconditionally. A panel dismissed while a text box had focus
+            // left the keyboard taken with nothing running that would ever give it back - every
+            // key on the machine swallowed until Ward was closed. What would have released it is
+            // below this return, which is the whole of the bug.
+            self.let_go(layer);
             return Ok(());
         }
 
@@ -764,6 +774,21 @@ impl Panel {
     /// clicked. A box that took focus because Ward asked it to — the compose field re-focusing
     /// itself after a question — opens the keyboard the same way one the Commander pointed at
     /// does.
+    /// Gives the keyboard back and puts the drawn one away, whatever else was happening.
+    ///
+    /// Called on every path that stops drawing the panel. Taking the Commander's keyboard is the
+    /// one thing here that outlives the frame which started it, so releasing it cannot depend on
+    /// reaching the end of a function.
+    fn let_go(&mut self, layer: &crate::vr::Overlay<'_>) {
+        crate::keys::steal::taking(false);
+        self.keyboard_dismissed = false;
+
+        if self.typing {
+            layer.hide_keyboard();
+            self.typing = false;
+        }
+    }
+
     fn keyboard(&mut self, layer: &crate::vr::Overlay<'_>, art: &crate::render::Renderer) {
         let wanted = art.wants_typing();
 

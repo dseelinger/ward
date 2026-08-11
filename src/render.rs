@@ -324,6 +324,10 @@ impl Renderer {
                 // Backspace, and delete, which some layouts send instead.
                 '\u{8}' | '\u{7f}' => self.typing.push(key(egui::Key::Backspace)),
                 '\r' | '\n' => self.typing.push(key(egui::Key::Enter)),
+                // Escape, which is how somebody gets out of a text box that will not let go of
+                // them. The toolkit surrenders focus on it, and focus is what decides whether Ward
+                // is holding the Commander's keyboard — so this is the way out of that as well.
+                '\u{1b}' => self.typing.push(key(egui::Key::Escape)),
                 // Everything else that is not a control code. A stray one typed into a folder
                 // path is a setting that will never resolve, with nothing on screen to say why.
                 other if !other.is_control() => {
@@ -341,12 +345,19 @@ impl Renderer {
     /// clipboard to write. A paste already carries the text, because reading the clipboard is the
     /// caller's job and not the toolkit's.
     pub fn clipboard(&mut self, what: &crate::keys::Typed) {
-        self.typing.push(match what {
+        // Text goes through `typed` rather than becoming an event here. Writing it out again was
+        // the same three lines with the interesting part left off: a backspace arrives as a
+        // control byte and has to become the key, and the rest of the control codes have to be
+        // dropped. Handed to the toolkit as text, a backspace puts an invisible character into the
+        // box instead of taking one out of it.
+        let event = match what {
+            crate::keys::Typed::Text(text) => return self.typed(text),
             crate::keys::Typed::Copy => egui::Event::Copy,
             crate::keys::Typed::Cut => egui::Event::Cut,
             crate::keys::Typed::Paste(text) => egui::Event::Paste(text.clone()),
-            crate::keys::Typed::Text(text) => egui::Event::Text(text.clone()),
-        });
+        };
+
+        self.typing.push(event);
     }
 
     /// Text the toolkit wants put on the clipboard, if a cut or a copy asked for any.

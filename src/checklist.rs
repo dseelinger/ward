@@ -9,6 +9,26 @@
 //! answer how far along you are, and how far along you are is the thing a
 //! spoken checklist is actually good at.
 //!
+//! ## It is a markdown file, because a checklist is a thing people edit
+//!
+//! `data/checklist.md`, holding `- [x] buy tritium at Deciat`. Everything else
+//! Ward writes is JSON, and this is not, on purpose: the settings file is
+//! something you correct once, and this is a list you will want open in an
+//! editor beside the game. Markdown task lists are the notation everyone
+//! already has, and the file reads as itself in a diff, a text box, or a
+//! terminal.
+//!
+//! Two consequences fall out of that choice and both are improvements.
+//!
+//! **Nothing the Commander writes is thrown away.** A line that is not a task
+//! is kept exactly where it was and written back untouched, so a heading, a
+//! blank line or a note between items survives Ward editing the list around it.
+//!
+//! **There is no such thing as a file that will not parse.** A malformed line
+//! is simply a line that is not a task, which means the whole question of what
+//! to do with an unreadable checklist — and the code that moved it aside —
+//! stops existing.
+//!
 //! ## One entrance, taken by both hands
 //!
 //! The panel does not edit the list directly. Ticking a box runs the same tool
@@ -25,7 +45,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::capability::{Capability, Kind, Slot, Tool};
@@ -34,16 +53,71 @@ use crate::shown::{Row, Shown};
 /// What the Commander sees this list called, everywhere it appears.
 const TITLE: &str = "Checklist";
 
+/// What a new file opens with, so it reads as a document rather than as
+/// somebody's data format. Kept as ordinary lines, so the Commander can change
+/// it and Ward will not put it back.
+const HEADER: [&str; 2] = ["# Checklist", ""];
+
 /// A cap on the list, so a stuck loop or a misheard instruction repeated forty
 /// times is bounded trouble rather than a file that grows until something else
 /// notices.
 const MOST_ITEMS: usize = 200;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct Item {
-    text: String,
-    #[serde(default)]
-    done: bool,
+/// One line of the file.
+///
+/// Everything is kept, not only the parts Ward understands. The alternative is
+/// that a note written between two items disappears the next time anything is
+/// ticked, which is the sort of quiet loss that stops somebody trusting a file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Line {
+    Item {
+        text: String,
+        done: bool,
+    },
+    /// Anything else, held exactly as written.
+    Kept(String),
+}
+
+/// Reads one line of the file.
+///
+/// Liberal about the notation, because the point of markdown is that the
+/// Commander types it themselves: any of the three bullet characters, any
+/// indentation, and a tick in either case.
+fn read_line(line: &str) -> Line {
+    let trimmed = line.trim_start();
+
+    let Some(rest) = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("+ "))
+    else {
+        return Line::Kept(line.to_string());
+    };
+
+    let done = match rest.get(..3) {
+        Some("[ ]") => false,
+        Some("[x]") | Some("[X]") => true,
+        _ => return Line::Kept(line.to_string()),
+    };
+
+    let text = rest[3..].trim().to_string();
+
+    // A bullet with a box and nothing after it is not an item anybody can name
+    // out loud, so it stays a line rather than becoming an unreachable task.
+    match text.is_empty() {
+        true => Line::Kept(line.to_string()),
+        false => Line::Item { text, done },
+    }
+}
+
+fn write_line(line: &Line) -> String {
+    match line {
+        Line::Kept(raw) => raw.clone(),
+        Line::Item { text, done } => match done {
+            true => format!("- [x] {text}"),
+            false => format!("- [ ] {text}"),
+        },
+    }
 }
 
 /// Which item a spoken phrase meant.
@@ -53,6 +127,7 @@ struct Item {
 /// done is a silent failure — the Commander hears "done" and believes it.
 #[derive(Debug, PartialEq)]
 enum Match {
+    /// The line it is on, not the item's position among items.
     One(usize),
     None,
     /// More than one item could be meant, so none is chosen.
@@ -73,44 +148,57 @@ fn plain(text: &str) -> String {
         .join(" ")
 }
 
+/// Every task in the file, with the line each one is on.
+fn tasks(lines: &[Line]) -> Vec<(usize, &str, bool)> {
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(at, line)| match line {
+            Line::Item { text, done } => Some((at, text.as_str(), *done)),
+            Line::Kept(_) => None,
+        })
+        .collect()
+}
+
 /// Finds the one item a phrase means, or refuses to choose.
-fn find(items: &[Item], phrase: &str) -> Match {
+fn find(lines: &[Line], phrase: &str) -> Match {
     let needle = plain(phrase);
 
     if needle.is_empty() {
         return Match::None;
     }
 
+    let tasks = tasks(lines);
+
     // An exact phrase wins outright, even if it is also contained in others.
     // Otherwise "refuel" could never be completed once "refuel at Jameson"
     // existed.
-    if let Some(at) = items.iter().position(|item| plain(&item.text) == needle) {
-        return Match::One(at);
+    if let Some((at, _, _)) = tasks.iter().find(|(_, text, _)| plain(text) == needle) {
+        return Match::One(*at);
     }
 
     // Containment in either direction, because the Commander may say less than
     // they wrote down or more.
-    let hits: Vec<usize> = items
+    let hits: Vec<(usize, &str)> = tasks
         .iter()
-        .enumerate()
-        .filter(|(_, item)| {
-            let text = plain(&item.text);
+        .filter(|(_, text, _)| {
+            let text = plain(text);
             text.contains(&needle) || needle.contains(&text)
         })
-        .map(|(at, _)| at)
+        .map(|(at, text, _)| (*at, *text))
         .collect();
 
     match hits.len() {
         0 => Match::None,
-        1 => Match::One(hits[0]),
-        _ => Match::Several(hits.iter().map(|at| items[*at].text.clone()).collect()),
+        1 => Match::One(hits[0].0),
+        _ => Match::Several(hits.iter().map(|(_, text)| text.to_string()).collect()),
     }
 }
 
 /// The list, and the only thing allowed to change it.
 pub struct Checklist {
     path: PathBuf,
-    items: Mutex<Vec<Item>>,
+    lines: Mutex<Vec<Line>>,
 }
 
 static TOOLS: &[Tool] = &[
@@ -163,47 +251,36 @@ static TOOLS: &[Tool] = &[
 ];
 
 impl Checklist {
-    /// Loads the list, or starts an empty one.
-    ///
-    /// A file that will not parse is **moved aside rather than replaced**. It
-    /// is the Commander's own writing, and the alternative is that the first
-    /// item added afterwards overwrites whatever was in there.
+    /// Loads the list, or starts a new file.
     pub fn load(path: &Path) -> Self {
-        let items = match std::fs::read_to_string(path) {
-            Err(_) => Vec::new(),
-
-            Ok(raw) if raw.trim().is_empty() => Vec::new(),
-
-            Ok(raw) => match serde_json::from_str::<Vec<Item>>(&raw) {
-                Ok(items) => items,
-                Err(e) => {
-                    let aside = path.with_extension("json.unreadable");
-
-                    match std::fs::rename(path, &aside) {
-                        Ok(()) => tracing::warn!(
-                            target: "ward::checklist",
-                            error = %e,
-                            kept = %aside.display(),
-                            "the checklist could not be read and was kept aside"
-                        ),
-                        Err(moving) => tracing::error!(
-                            target: "ward::checklist",
-                            error = %e,
-                            moving = %moving,
-                            "the checklist could not be read or moved aside"
-                        ),
-                    }
-
-                    Vec::new()
-                }
-            },
+        let lines: Vec<Line> = match std::fs::read_to_string(path) {
+            Ok(raw) => raw.lines().map(read_line).collect(),
+            // A file that is not there is an ordinary first run. One that
+            // cannot be read is worth saying out loud, but it is still not a
+            // reason to refuse to start.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                HEADER.iter().map(|l| Line::Kept(l.to_string())).collect()
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "ward::checklist",
+                    error = %e,
+                    path = %path.display(),
+                    "the checklist could not be read, starting a new one"
+                );
+                HEADER.iter().map(|l| Line::Kept(l.to_string())).collect()
+            }
         };
 
-        tracing::info!(target: "ward::checklist", items = items.len(), "loaded");
+        tracing::info!(
+            target: "ward::checklist",
+            items = tasks(&lines).len(),
+            "loaded"
+        );
 
         Self {
             path: path.to_path_buf(),
-            items: Mutex::new(items),
+            lines: Mutex::new(lines),
         }
     }
 
@@ -212,16 +289,11 @@ impl Checklist {
     /// Returns what to append to the Commander's answer, which is nothing when
     /// it worked. A checklist that quietly stops saving is one the Commander
     /// keeps using and then loses.
-    fn save(&self, items: &[Item]) -> String {
-        let body = match serde_json::to_string_pretty(items) {
-            Ok(body) => body,
-            Err(e) => {
-                tracing::error!(target: "ward::checklist", error = %e, "could not write the checklist");
-                return " I could not save the list, so this will not survive a restart.".into();
-            }
-        };
+    fn save(&self, lines: &[Line]) -> String {
+        let mut body: String = lines.iter().map(write_line).collect::<Vec<_>>().join("\n");
+        body.push('\n');
 
-        match crate::config::write_atomically(&self.path, &format!("{body}\n")) {
+        match crate::config::write_atomically(&self.path, &body) {
             Ok(()) => String::new(),
             Err(e) => {
                 tracing::error!(target: "ward::checklist", error = %e, "could not save the checklist");
@@ -230,25 +302,22 @@ impl Checklist {
         }
     }
 
+    fn held(&self) -> std::sync::MutexGuard<'_, Vec<Line>> {
+        match self.lines.lock() {
+            Ok(lines) => lines,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     /// Everything on the list right now.
     pub fn shown(&self) -> Shown {
-        let rows = match self.items.lock() {
-            Ok(items) => items
-                .iter()
-                .map(|item| Row {
-                    text: item.text.clone(),
-                    done: item.done,
-                })
-                .collect(),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .iter()
-                .map(|item| Row {
-                    text: item.text.clone(),
-                    done: item.done,
-                })
-                .collect(),
-        };
+        let rows = tasks(&self.held())
+            .into_iter()
+            .map(|(_, text, done)| Row {
+                text: text.to_string(),
+                done,
+            })
+            .collect();
 
         Shown::List {
             title: TITLE.to_string(),
@@ -263,51 +332,61 @@ impl Checklist {
             return "There was nothing to add.".to_string();
         }
 
-        let mut items = match self.items.lock() {
-            Ok(items) => items,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut lines = self.held();
 
-        if items.len() >= MOST_ITEMS {
+        if tasks(&lines).len() >= MOST_ITEMS {
             return format!("The checklist is full at {MOST_ITEMS} items.");
         }
 
         // Said twice is meant once. Adding it again would leave the Commander
         // completing one copy and reading back the other.
-        if let Match::One(at) = find(&items, text)
-            && plain(&items[at].text) == plain(text)
+        if let Match::One(at) = find(&lines, text)
+            && let Line::Item { text: existing, .. } = &lines[at]
+            && plain(existing) == plain(text)
         {
-            return format!("\"{}\" is already on the list.", items[at].text);
+            return format!("\"{existing}\" is already on the list.");
         }
 
-        items.push(Item {
-            text: text.to_string(),
-            done: false,
-        });
+        // Beneath the last task rather than at the end of the file, so a note
+        // the Commander wrote under the list stays under the list.
+        let at = match tasks(&lines).last() {
+            Some((last, _, _)) => last + 1,
+            None => lines.len(),
+        };
 
-        let trouble = self.save(&items);
+        lines.insert(
+            at,
+            Line::Item {
+                text: text.to_string(),
+                done: false,
+            },
+        );
+
+        let trouble = self.save(&lines);
 
         format!("Added \"{text}\" to the checklist.{trouble}")
     }
 
     fn complete(&self, phrase: &str) -> String {
-        let mut items = match self.items.lock() {
-            Ok(items) => items,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut lines = self.held();
 
-        match find(&items, phrase) {
-            Match::None => nothing_like(phrase, &items),
+        match find(&lines, phrase) {
+            Match::None => nothing_like(phrase, &lines),
             Match::Several(names) => ambiguous(phrase, &names),
-            Match::One(at) if items[at].done => {
-                format!("\"{}\" was already done.", items[at].text)
-            }
             Match::One(at) => {
-                items[at].done = true;
-                let text = items[at].text.clone();
+                let Line::Item { text, done } = &mut lines[at] else {
+                    return nothing_like(phrase, &lines);
+                };
 
-                let left = items.iter().filter(|item| !item.done).count();
-                let trouble = self.save(&items);
+                if *done {
+                    return format!("\"{text}\" was already done.");
+                }
+
+                *done = true;
+                let text = text.clone();
+
+                let left = tasks(&lines).iter().filter(|(_, _, done)| !done).count();
+                let trouble = self.save(&lines);
 
                 match left {
                     0 => format!("\"{text}\" done. That is the whole list.{trouble}"),
@@ -319,31 +398,31 @@ impl Checklist {
     }
 
     fn remove(&self, phrase: &str) -> String {
-        let mut items = match self.items.lock() {
-            Ok(items) => items,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut lines = self.held();
 
-        match find(&items, phrase) {
-            Match::None => nothing_like(phrase, &items),
+        match find(&lines, phrase) {
+            Match::None => nothing_like(phrase, &lines),
             Match::Several(names) => ambiguous(phrase, &names),
             Match::One(at) => {
-                let removed = items.remove(at);
-                let trouble = self.save(&items);
+                let Line::Item { text, .. } = lines.remove(at) else {
+                    return nothing_like(phrase, &lines);
+                };
 
-                format!("Took \"{}\" off the checklist.{trouble}", removed.text)
+                let trouble = self.save(&lines);
+
+                format!("Took \"{text}\" off the checklist.{trouble}")
             }
         }
     }
 }
 
 /// Nothing matched, so say what is there rather than only that it is not.
-fn nothing_like(phrase: &str, items: &[Item]) -> String {
-    if items.is_empty() {
+fn nothing_like(phrase: &str, lines: &[Line]) -> String {
+    let names: Vec<&str> = tasks(lines).into_iter().map(|(_, text, _)| text).collect();
+
+    if names.is_empty() {
         return "The checklist is empty.".to_string();
     }
-
-    let names: Vec<&str> = items.iter().map(|item| item.text.as_str()).collect();
 
     format!(
         "Nothing on the checklist matches \"{phrase}\". It has: {}.",
@@ -408,20 +487,139 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ward-checklist-test-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join("checklist.json")
+        dir.join("checklist.md")
     }
 
     fn fresh(name: &str) -> Checklist {
         Checklist::load(&temp(name))
     }
 
-    fn items(text: &[&str]) -> Vec<Item> {
-        text.iter()
-            .map(|t| Item {
-                text: t.to_string(),
-                done: false,
-            })
-            .collect()
+    fn lines(markdown: &str) -> Vec<Line> {
+        markdown.lines().map(read_line).collect()
+    }
+
+    fn rows_of(list: &Checklist) -> Vec<Row> {
+        let Shown::List { rows, .. } = list.shown() else {
+            panic!("a checklist should show as a list");
+        };
+        rows
+    }
+
+    #[test]
+    fn a_task_list_is_read_as_tasks() {
+        assert_eq!(
+            read_line("- [ ] buy tritium"),
+            Line::Item {
+                text: "buy tritium".into(),
+                done: false
+            }
+        );
+        assert_eq!(
+            read_line("- [x] buy tritium"),
+            Line::Item {
+                text: "buy tritium".into(),
+                done: true
+            }
+        );
+    }
+
+    #[test]
+    fn the_notation_a_person_would_actually_type_is_accepted() {
+        // The point of markdown is that the Commander writes it themselves, so
+        // being strict about which bullet or which case of tick would make the
+        // format a trap rather than a convenience.
+        for written in [
+            "* [x] buy tritium",
+            "+ [x] buy tritium",
+            "  - [X] buy tritium",
+            "- [x]   buy tritium  ",
+        ] {
+            assert_eq!(
+                read_line(written),
+                Line::Item {
+                    text: "buy tritium".into(),
+                    done: true
+                },
+                "did not read: {written:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn anything_that_is_not_a_task_stays_a_line() {
+        assert_eq!(read_line("# Checklist"), Line::Kept("# Checklist".into()));
+        assert_eq!(read_line(""), Line::Kept("".into()));
+        assert_eq!(
+            read_line("just a note to myself"),
+            Line::Kept("just a note to myself".into())
+        );
+        // A box with nothing after it cannot be named out loud, so it is not a
+        // task - it would be an item no voice command could ever reach.
+        assert_eq!(read_line("- [ ] "), Line::Kept("- [ ] ".into()));
+    }
+
+    #[test]
+    fn what_is_written_is_what_is_read_back() {
+        let markdown = "- [x] buy tritium at Deciat";
+        assert_eq!(write_line(&read_line(markdown)), markdown);
+    }
+
+    #[test]
+    fn the_file_on_disk_is_markdown_a_person_can_edit() {
+        let path = temp("looks-right");
+        let list = Checklist::load(&path);
+
+        list.run("checklist_add", &json!({"item": "buy tritium at Deciat"}));
+        list.run("checklist_add", &json!({"item": "refuel"}));
+        list.run("checklist_complete", &json!({"item": "tritium"}));
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# Checklist\n\n- [x] buy tritium at Deciat\n- [ ] refuel\n"
+        );
+    }
+
+    #[test]
+    fn a_note_the_commander_wrote_survives_ward_editing_around_it() {
+        // The whole reason for keeping every line. A note that disappears the
+        // next time anything is ticked is how somebody stops trusting a file.
+        let path = temp("preserved");
+        std::fs::write(
+            &path,
+            "# My run\n\nDeciat trip, do these in order:\n\n- [ ] buy tritium\n\nremember the fuel scoop\n",
+        )
+        .unwrap();
+
+        let list = Checklist::load(&path);
+        list.run("checklist_complete", &json!({"item": "tritium"}));
+        list.run("checklist_add", &json!({"item": "refuel"}));
+
+        let written = std::fs::read_to_string(&path).unwrap();
+
+        assert!(written.contains("# My run"), "got: {written}");
+        assert!(
+            written.contains("Deciat trip, do these in order:"),
+            "got: {written}"
+        );
+        assert!(
+            written.contains("remember the fuel scoop"),
+            "got: {written}"
+        );
+        assert!(written.contains("- [x] buy tritium"), "got: {written}");
+    }
+
+    #[test]
+    fn a_new_item_goes_under_the_list_rather_than_at_the_end_of_the_file() {
+        let path = temp("placed");
+        std::fs::write(&path, "- [ ] buy tritium\n\nremember the fuel scoop\n").unwrap();
+
+        let list = Checklist::load(&path);
+        list.run("checklist_add", &json!({"item": "refuel"}));
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "- [ ] buy tritium\n- [ ] refuel\n\nremember the fuel scoop\n"
+        );
     }
 
     #[test]
@@ -447,10 +645,7 @@ mod tests {
         list.run("checklist_add", &json!({"item": "buy tritium"}));
         list.run("checklist_complete", &json!({"item": "buy tritium"}));
 
-        let Shown::List { rows, .. } = list.shown() else {
-            panic!("a checklist should show as a list");
-        };
-
+        let rows = rows_of(&list);
         assert_eq!(rows.len(), 1, "the item was dropped: {rows:?}");
         assert!(rows[0].done);
     }
@@ -462,18 +657,14 @@ mod tests {
         list.run("checklist_add", &json!({"item": "buy tritium"}));
         list.run("checklist_remove", &json!({"item": "tritium"}));
 
-        let Shown::List { rows, .. } = list.shown() else {
-            panic!("a checklist should show as a list");
-        };
-
-        assert!(rows.is_empty(), "still there: {rows:?}");
+        assert!(rows_of(&list).is_empty());
     }
 
     #[test]
     fn part_of_an_item_is_enough_to_name_it() {
         // Nobody repeats what they wrote down word for word, and the
         // transcription will not either.
-        let list = items(&["buy tritium at Deciat", "swap to the Krait"]);
+        let list = lines("- [ ] buy tritium at Deciat\n- [ ] swap to the Krait");
 
         assert_eq!(find(&list, "tritium"), Match::One(0));
         assert_eq!(find(&list, "the Krait"), Match::One(1));
@@ -481,8 +672,16 @@ mod tests {
     }
 
     #[test]
+    fn a_phrase_is_matched_against_tasks_and_not_against_notes() {
+        // Lines that are not tasks are kept, which means they are also in the
+        // list being searched. Matching one would offer to complete a heading.
+        let list = lines("# Tritium run\n\n- [ ] refuel\n");
+        assert_eq!(find(&list, "tritium"), Match::None);
+    }
+
+    #[test]
     fn saying_more_than_was_written_down_still_finds_it() {
-        let list = items(&["refuel"]);
+        let list = lines("- [ ] refuel");
         assert_eq!(find(&list, "refuel at Jameson Memorial"), Match::One(0));
     }
 
@@ -490,7 +689,7 @@ mod tests {
     fn two_possible_items_are_never_guessed_between() {
         // The failure this prevents is silent: the Commander hears "done" and
         // believes the right thing was ticked.
-        let list = items(&["buy tritium at Deciat", "buy tritium at Sol"]);
+        let list = lines("- [ ] buy tritium at Deciat\n- [ ] buy tritium at Sol");
 
         let Match::Several(names) = find(&list, "buy tritium") else {
             panic!("it picked one of two");
@@ -512,12 +711,9 @@ mod tests {
         assert!(answer.contains("Sol"), "got: {answer}");
         assert!(answer.contains("Which one"), "got: {answer}");
 
-        let Shown::List { rows, .. } = list.shown() else {
-            panic!("a checklist should show as a list");
-        };
         assert!(
-            rows.iter().all(|r| !r.done),
-            "something was ticked anyway: {rows:?}"
+            rows_of(&list).iter().all(|r| !r.done),
+            "something was ticked anyway"
         );
     }
 
@@ -525,7 +721,7 @@ mod tests {
     fn an_exact_phrase_beats_being_contained_in_another() {
         // Without this, "refuel" could never be completed once "refuel at
         // Jameson" existed - the shorter item would be permanently ambiguous.
-        let list = items(&["refuel", "refuel at Jameson"]);
+        let list = lines("- [ ] refuel\n- [ ] refuel at Jameson");
         assert_eq!(find(&list, "refuel"), Match::One(0));
     }
 
@@ -548,11 +744,7 @@ mod tests {
         let answer = list.run("checklist_add", &json!({"item": "Buy tritium."}));
 
         assert!(answer.contains("already on the list"), "got: {answer}");
-
-        let Shown::List { rows, .. } = list.shown() else {
-            panic!("a checklist should show as a list");
-        };
-        assert_eq!(rows.len(), 1, "added twice: {rows:?}");
+        assert_eq!(rows_of(&list).len(), 1, "added twice");
     }
 
     #[test]
@@ -562,10 +754,7 @@ mod tests {
         list.run("checklist_add", &json!({"item": "buy tritium at Deciat"}));
         list.run("checklist_add", &json!({"item": "buy tritium at Sol"}));
 
-        let Shown::List { rows, .. } = list.shown() else {
-            panic!("a checklist should show as a list");
-        };
-        assert_eq!(rows.len(), 2, "one was refused: {rows:?}");
+        assert_eq!(rows_of(&list).len(), 2, "one was refused");
     }
 
     #[test]
@@ -586,26 +775,6 @@ mod tests {
     }
 
     #[test]
-    fn a_checklist_that_will_not_parse_is_kept_rather_than_replaced() {
-        // The Commander's own writing. Starting empty and overwriting it with
-        // the next item added is how it would be lost for good.
-        let path = temp("unreadable");
-        std::fs::write(&path, "{ this was never an array").unwrap();
-
-        let list = Checklist::load(&path);
-        list.run("checklist_add", &json!({"item": "buy tritium"}));
-
-        let aside = path.with_extension("json.unreadable");
-
-        assert!(aside.is_file(), "the old file was not kept");
-        assert!(
-            std::fs::read_to_string(&aside)
-                .unwrap()
-                .contains("never an array")
-        );
-    }
-
-    #[test]
     fn an_empty_list_reads_as_empty_rather_than_as_a_failure() {
         let list = fresh("empty");
         assert_eq!(
@@ -620,11 +789,7 @@ mod tests {
         // the panel is impossible to remove by voice.
         let list = fresh("blank");
         list.run("checklist_add", &json!({"item": "   "}));
-
-        let Shown::List { rows, .. } = list.shown() else {
-            panic!("a checklist should show as a list");
-        };
-        assert!(rows.is_empty(), "a blank item was added: {rows:?}");
+        assert!(rows_of(&list).is_empty());
     }
 
     #[test]
@@ -645,10 +810,7 @@ mod tests {
             list.run("checklist_add", &json!({ "item": format!("item {n}") }));
         }
 
-        let Shown::List { rows, .. } = list.shown() else {
-            panic!("a checklist should show as a list");
-        };
-        assert_eq!(rows.len(), MOST_ITEMS);
+        assert_eq!(rows_of(&list).len(), MOST_ITEMS);
     }
 
     #[test]
@@ -674,10 +836,7 @@ mod tests {
             hand.join().unwrap();
         }
 
-        let Shown::List { rows, .. } = list.shown() else {
-            panic!("a checklist should show as a list");
-        };
-        assert_eq!(rows.len(), 80, "an add was lost");
+        assert_eq!(rows_of(&list).len(), 80, "an add was lost");
     }
 
     #[test]

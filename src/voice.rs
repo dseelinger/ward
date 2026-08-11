@@ -244,16 +244,52 @@ fn sentence_end(text: &str) -> usize {
         .unwrap_or(text.len())
 }
 
-/// Breaks a reply into the pieces that will be spoken, in order.
+/// The byte offset of the `room`th character, or the end.
+fn at_character(text: &str, room: usize) -> usize {
+    text.char_indices()
+        .nth(room)
+        .map(|(at, _)| at)
+        .unwrap_or(text.len())
+}
+
+/// Where to cut so that what comes off is no longer than `room`.
 ///
-/// Split on sentence endings, because that is where a voice pauses anyway. A
-/// break anywhere else is audible: the pieces are synthesized separately and
-/// joined by playing one after another, so a seam inside a clause sounds like
-/// a stumble.
+/// A whole sentence when one fits, because that is where a voice pauses anyway.
+/// When one does not fit, a clause break — the model writes sentences of three
+/// hundred characters, and refusing to cut one meant the first piece was the
+/// whole sentence and the fast start was no faster at all.
+///
+/// A comma is a worse seam than a full stop and a much better one than silence.
+/// The pieces are synthesized separately and joined by playing one after
+/// another, so the seam is audible wherever it falls; the question is only
+/// whether it sounds like a pause or like a stumble.
+fn break_at(text: &str, room: usize) -> usize {
+    let end = sentence_end(text);
+
+    if text[..end].chars().count() <= room {
+        return end;
+    }
+
+    let cut = at_character(text, room);
+
+    // A clause break, taken with its punctuation so the pause is spoken.
+    if let Some(at) = text[..cut].rfind([',', ';', ':', '\u{2014}']) {
+        return at + 1;
+    }
+
+    // Failing that, a word boundary. Only a single unbroken run of characters
+    // longer than the whole allowance falls past this, and cutting one of those
+    // anywhere is equally wrong.
+    match text[..cut].rfind(' ') {
+        Some(at) => at + 1,
+        None => cut,
+    }
+}
+
+/// Breaks a reply into the pieces that will be spoken, in order.
 pub fn into_pieces(text: &str) -> Vec<String> {
     let mut pieces: Vec<String> = Vec::new();
     let mut piece = String::new();
-
     let mut rest = text.trim();
 
     while !rest.is_empty() {
@@ -262,20 +298,23 @@ pub fn into_pieces(text: &str) -> Vec<String> {
             false => THEN,
         };
 
-        let (sentence, remainder) = rest.split_at(sentence_end(rest));
-        rest = remainder.trim_start();
+        let left = room.saturating_sub(piece.chars().count());
 
-        if !piece.is_empty() && piece.chars().count() + sentence.chars().count() > room {
+        // What is left of this piece will not hold another sentence, so send it
+        // and start the next one.
+        if !piece.is_empty() && sentence_end(rest) > at_character(rest, left) {
             pieces.push(std::mem::take(&mut piece));
+            continue;
         }
+
+        let (chunk, remainder) = rest.split_at(break_at(rest, room));
+        rest = remainder.trim_start();
 
         if !piece.is_empty() {
             piece.push(' ');
         }
-        piece.push_str(sentence.trim());
+        piece.push_str(chunk.trim());
 
-        // A piece that is already long enough goes now rather than waiting to
-        // be pushed over the line by the sentence after it.
         if piece.chars().count() >= room {
             pieces.push(std::mem::take(&mut piece));
         }
@@ -625,6 +664,47 @@ mod tests {
             .await
             .expect("playback thread failed")
             .expect("playback failed");
+    }
+
+    #[test]
+    fn one_long_sentence_is_still_broken_up() {
+        // The bug this replaced a passing test for. The model writes sentences
+        // of three hundred characters, and a splitter that only cuts between
+        // sentences made the whole first one the first piece - so the fast
+        // start measured five and a half seconds, exactly as slow as before.
+        let one_sentence = "The Thargoids are an ancient alien species that                             humanity first clashed with centuries ago, went                             dormant for a very long time afterwards, and then                             began resurfacing a few years back to attack                             outposts and infest systems across the bubble.";
+
+        assert_eq!(
+            sentence_end(one_sentence),
+            one_sentence.len(),
+            "not one sentence"
+        );
+
+        let pieces = into_pieces(one_sentence);
+
+        assert!(
+            pieces.len() > 1,
+            "a single long sentence was not broken: {pieces:?}"
+        );
+        assert!(
+            pieces[0].chars().count() <= FIRST,
+            "the first piece is {} characters: {:?}",
+            pieces[0].chars().count(),
+            pieces[0]
+        );
+    }
+
+    #[test]
+    fn a_forced_break_falls_on_a_clause_rather_than_mid_word() {
+        let one_sentence = "The Thargoids are an ancient alien species that                             humanity first clashed with centuries ago, went                             dormant for a very long time afterwards, and then                             began resurfacing.";
+
+        let first = &into_pieces(one_sentence)[0];
+        let last = first.trim().chars().last().unwrap();
+
+        assert!(
+            matches!(last, '.' | '!' | '?' | ',' | ';' | ':'),
+            "cut mid-clause: {first:?}"
+        );
     }
 
     #[test]

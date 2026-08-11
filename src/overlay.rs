@@ -35,7 +35,32 @@ const REDRAW: Duration = Duration::from_millis(100);
 const RETRY: Duration = Duration::from_secs(5);
 
 /// How wide the caption layer is, in metres.
-const WIDTH: f32 = 1.4;
+///
+/// At the distance below this subtends about thirty degrees, which is roughly
+/// what a subtitle band occupies on a television watched from a sofa. The first
+/// attempt was 1.4 metres and read as enormous: at this distance that is
+/// close to fifty degrees, so a caption filled the middle of the view and the
+/// cockpit was behind it rather than around it.
+const WIDTH: f32 = 0.9;
+
+/// White on black, and neither is decoration.
+///
+/// A caption sits over a starfield, a station's floodlights and the cockpit's
+/// own instruments. Text with nothing behind it is unreadable against half of
+/// those, which is why broadcast captioning has always put it on a box.
+///
+/// Not quite opaque: enough to read against anything, little enough that the
+/// Commander can still see what is behind it. Not quite white, because pure
+/// white on black rings at this contrast.
+const BOX: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 200);
+const INK: egui::Color32 = egui::Color32::from_rgb(240, 240, 240);
+
+/// How large the caption text is drawn, in points.
+///
+/// Sized so a full forty-two character line fills the layer's width rather than
+/// chosen by eye. The layer is [`PIXELS`] wide and drawn at the renderer's own
+/// scale, so this is the number that makes a standard line fit exactly.
+const TEXT: f32 = 26.0;
 
 /// Where the captions sit relative to the Commander's head, in metres.
 ///
@@ -47,9 +72,9 @@ const BELOW: f32 = 0.45;
 
 /// The size of the image captions are drawn into.
 ///
-/// Wide and short, because three lines of text is that shape. Drawing a square
-/// and using a third of it would cost memory and sharpness for nothing.
-const PIXELS: (u32, u32) = (1600, 400);
+/// Wide and short, because two lines of text is that shape. Drawing a square
+/// and using a quarter of it would cost memory and sharpness for nothing.
+const PIXELS: (u32, u32) = (1600, 260);
 
 /// Starts the caption layer.
 ///
@@ -126,34 +151,31 @@ fn show_captions(
     )))?;
     overlay.hide()?;
 
-    let mut showing = false;
+    let mut visible = false;
 
     loop {
         let now = crate::diag::since_start();
 
         // Held only long enough to read. The window thread writes to this
         // whenever Ward says something, and it must never wait on a frame.
-        let (quiet, lines) = {
+        let showing = {
             let Ok(mut captions) = captions.lock() else {
                 return Ok(());
             };
             captions.tick(now);
-            (
-                captions.quiet(),
-                captions.lines().cloned().collect::<Vec<_>>(),
-            )
+            captions.showing().cloned()
         };
 
-        if quiet {
-            if showing {
+        let Some(caption) = showing else {
+            if visible {
                 overlay.hide()?;
-                showing = false;
+                visible = false;
             }
             std::thread::sleep(REDRAW);
             continue;
-        }
+        };
 
-        renderer.draw(|ui| draw_captions(ui, &lines));
+        renderer.draw(|ui| draw_caption(ui, &caption));
 
         let Some(image) = renderer.vulkan_image() else {
             return Err("the renderer produced no image OpenVR could read".into());
@@ -165,36 +187,52 @@ fn show_captions(
         // is writing to it while OpenVR reads.
         unsafe { overlay.set_texture(&image) }?;
 
-        if !showing {
+        if !visible {
             overlay.show()?;
-            showing = true;
+            visible = true;
         }
 
         std::thread::sleep(REDRAW);
     }
 }
 
-/// One frame of captions.
+/// One frame of caption.
 ///
-/// Deliberately plain. This is read at a metre, over a moving starfield, by
-/// somebody whose attention is on flying — so it is light text on a dark slab
-/// and nothing else. No border, no title, no controls: there is nothing here to
-/// interact with, and anything that looks interactive in a caption layer is a
-/// lie, because the layer does not take input at all.
-fn draw_captions(ui: &mut egui::Ui, lines: &[crate::captions::Line]) {
-    ui.vertical(|ui| {
-        for line in lines {
-            let text = match line.speaker {
-                Some(who) => format!("{who}: {}", line.text),
-                None => line.text.clone(),
-            };
+/// White text on a black box, which is not a style choice. A caption sits over
+/// a starfield, a station's floodlights and a cockpit's own instruments, and
+/// text with nothing behind it is unreadable against half of them. The box is
+/// what broadcast captioning has always used, for the same reason.
+///
+/// The box is drawn around the text rather than filling the layer, so an
+/// overlay with one short line is one short bar rather than a black slab with a
+/// sentence in the corner of it.
+///
+/// No border, no title, no controls. There is nothing here to interact with,
+/// and anything that looks interactive in a caption layer is a lie — the layer
+/// does not take input at all.
+fn draw_caption(ui: &mut egui::Ui, caption: &crate::captions::Caption) {
+    // Sits at the bottom of the layer, so a two-line caption grows upward and
+    // the last line stays where the eye already is.
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+        egui::Frame::new()
+            .fill(BOX)
+            .inner_margin(egui::Margin::symmetric(14, 8))
+            .corner_radius(2)
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
 
-            ui.label(
-                egui::RichText::new(text)
-                    .size(34.0)
-                    .color(egui::Color32::from_rgb(235, 235, 240)),
-            );
-            ui.add_space(6.0);
-        }
+                    for (at, line) in caption.lines.iter().enumerate() {
+                        // The speaker is named once, on the first line, and
+                        // never repeated down a caption that happens to wrap.
+                        let text = match (at, caption.speaker) {
+                            (0, Some(who)) => format!("{who}: {line}"),
+                            _ => line.clone(),
+                        };
+
+                        ui.label(egui::RichText::new(text).size(TEXT).color(INK));
+                    }
+                });
+            });
     });
 }

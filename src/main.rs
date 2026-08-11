@@ -591,7 +591,7 @@ impl Ward {
         // transcript of what was said; it is the same act, shown rather than
         // spoken, and it appears when the act does.
         if let Ok(mut captions) = self.captions.lock() {
-            captions.started(act);
+            captions.started(act, diag::since_start());
         }
 
         let Body::Text(text) = &act.body else {
@@ -1254,10 +1254,8 @@ impl eframe::App for Ward {
             // The caption holds from here, not from when Ward started talking.
             // Timed from the start, a long reply clears itself off the headset
             // while the voice is still saying it.
-            if let Some(act) = self.speech.speaking()
-                && let Ok(mut captions) = self.captions.lock()
-            {
-                captions.finished(now, act.dwell());
+            if let Ok(mut captions) = self.captions.lock() {
+                captions.finished(now);
             }
 
             self.speech.finished();

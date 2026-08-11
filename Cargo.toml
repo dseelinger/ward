@@ -38,18 +38,29 @@ tracing-subscriber = { version = "0.3.23", features = ["fmt", "json", "env-filte
 whisper-rs = { version = "0.16.0", default-features = false, features = ["tracing_backend"] }
 wgpu = "30.0.0"
 windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
-# Named for what it does inside whisper-rs, not for what it sounds like. That
-# crate builds its C++ one way for a debug build and another for a release one,
-# and on this workload the debug configuration is eleven times faster: a two
-# second clip took 2.4 seconds to transcribe one way and 25.5 the other, on the
-# same machine with the same model, with a fan audible across the room.
+# Ward's release builds compiled the speech model's C++ with the optimizer off,
+# and this turns it back on.
 #
-# The output is identical - the end-to-end test transcribes a spoken sentence
-# word for word either way - so this is speed with nothing traded for it.
+# The cost was eleven to one: transcribing two seconds of audio took 25.5
+# seconds in a release build and 2.4 in a debug one, on the same machine with
+# the same model. Only the release build - so every measurement taken while
+# developing looked fine, and the binary handed to somebody to try did not.
 #
-# What in that branch does it is still not established. It changes the CMake
-# configuration and defines WHISPER_DEBUG, and setting the configuration alone
-# through the environment did not help, so it is not simply which optimizer
-# flags are used. The flag is on because it was measured, not because the
-# mechanism is understood.
+# How it happens. whisper-rs-sys asks the cmake crate for a Release build, and
+# the cmake crate then passes CMake its own compiler flags for that
+# configuration. Those flags *replace* the ones CMake had rather than adding to
+# them, and they contain no /O at all - so the Release configuration compiles
+# with optimization disabled. A debug build takes the other branch of that
+# script, lands on a different configuration, and keeps its optimizer flags,
+# which is why the fast build was the one nobody was worried about.
+#
+# Why this feature rather than the flags directly. Setting the flags needs an
+# environment variable at build time, and cargo's own `[env]` table does not
+# reach a dependency's build script - so it would have to be remembered by
+# every build, everywhere, forever. This is one line that always applies.
+# The name is the crate's, and means "use the configuration a debug build uses",
+# which on this workload is the optimized one.
+#
+# Nothing is traded for it: the end-to-end test speaks a sentence and
+# transcribes it back word for word, and passes either way.
 whisper-rs-sys = { version = "0.15.0", features = ["force-debug"] }

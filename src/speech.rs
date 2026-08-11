@@ -327,6 +327,103 @@ impl Arbiter {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_act_goes_stale_after_its_time_and_not_at_it() {
+        // The boundary, both sides. Off by one here means ambient color either
+        // outliving the moment it described or being dropped a tick early, and
+        // neither shows up in a test that only looks at the middle.
+        let act = Act::text(
+            Speaker::Ward,
+            Register::Ambient,
+            "a nice view",
+            Duration::ZERO,
+        )
+        .expiring_after(Duration::from_secs(10));
+
+        assert!(!act.stale(Duration::from_secs(9)));
+        assert!(
+            !act.stale(Duration::from_secs(10)),
+            "exactly at its time is still worth saying"
+        );
+        assert!(act.stale(Duration::from_secs(11)));
+    }
+
+    #[test]
+    fn an_act_with_no_time_limit_never_goes_stale() {
+        let act = Act::text(Speaker::Ward, Register::Reply, "an answer", Duration::ZERO);
+
+        assert!(!act.stale(Duration::from_secs(60 * 60)));
+    }
+
+    #[test]
+    fn a_full_queue_says_which_line_it_shed() {
+        // Two outcomes from one comparison, and the difference matters: an act
+        // that was dropped the moment it was offered never plays, and the
+        // caller is the only thing that can notice. An act that displaced an
+        // older one did play, and reporting that as dropped would have the
+        // caller chasing a line that is about to be said.
+        let mut arbiter = Arbiter::new(2);
+        let earlier = Duration::ZERO;
+        let now = Duration::from_secs(10);
+
+        for _ in 0..3 {
+            arbiter.offer(
+                Act::text(Speaker::Ward, Register::Reply, "an answer", earlier),
+                earlier,
+            );
+        }
+
+        // The least important waiting act is the one just offered, so it is the
+        // one shed - and it is the offer that has to be told.
+        let outcome = arbiter.offer(
+            Act::text(Speaker::Ward, Register::Ambient, "a nice view", now),
+            now,
+        );
+
+        assert_eq!(outcome, Outcome::Dropped("queue is full"));
+
+        // Where something older is shed instead, the new act is on the queue
+        // and waiting rather than gone.
+        let mut arbiter = Arbiter::new(2);
+
+        for _ in 0..3 {
+            arbiter.offer(
+                Act::text(Speaker::Ward, Register::Ambient, "color", earlier),
+                earlier,
+            );
+        }
+
+        let outcome = arbiter.offer(
+            Act::text(Speaker::Ward, Register::Reply, "an answer", now),
+            now,
+        );
+
+        assert_eq!(outcome, Outcome::Queued);
+    }
+
+    #[test]
+    fn something_of_equal_importance_waits_its_turn() {
+        // Only something *more* important cuts in. Equal priority queueing
+        // rather than preempting is what stops two replies talking over each
+        // other, and it is one comparison away from the opposite.
+        let mut arbiter = Arbiter::default();
+        let now = Duration::ZERO;
+
+        arbiter.offer(Act::text(Speaker::Ward, Register::Reply, "first", now), now);
+        arbiter.next(now);
+
+        let outcome = arbiter.offer(
+            Act::text(Speaker::Ward, Register::Reply, "second", now),
+            now,
+        );
+
+        assert_eq!(outcome, Outcome::Queued, "an equal act should not cut in");
+        assert_eq!(
+            arbiter.speaking().map(|a| a.body.clone()),
+            Some(Body::Text("first".to_string()))
+        );
+    }
+
     fn at(ms: u64) -> Duration {
         Duration::from_millis(ms)
     }

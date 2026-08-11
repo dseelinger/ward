@@ -509,8 +509,12 @@ this record is tested against the entry rather than against the implementation.
 A test derived by reading the code pins what the code does rather than what it
 should do, and preserves a bug as faithfully as it preserves anything else.
 
-> open — nothing runs mutants today, so the floors are the only thing measuring
-> the tests and they cannot see this.
+> open — the runner exists and the score is recorded, and no floor is held yet.
+> `.github/workflows/mutants.yml` runs weekly and on demand; `check/mutants.md`
+> carries where it landed on the pure tier and shows why the three that survive
+> cannot be killed. The floor waits for a few runs of history, which is the
+> decision's own instruction: a number picked before anybody watched it is a
+> number nobody has watched fail.
 > [#130](https://github.com/dseelinger/ward/issues/130)
 
 ## D47 — A silenced test says why, in the attribute

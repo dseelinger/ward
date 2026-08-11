@@ -330,6 +330,87 @@ impl Captions {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_line_exactly_as_long_as_the_standard_allows_is_not_wrapped() {
+        // The boundary, both sides. Wrapping one character early wastes a line
+        // on a two-line caption; wrapping one late puts a character past the
+        // edge of a box sized for the standard.
+        let exactly = "a".repeat(PER_LINE);
+        assert_eq!(into_lines(&exactly).len(), 1);
+
+        // Two words adding up to exactly the allowance, with the space between
+        // them counted. This is the case that tells the boundary from one
+        // character either side of it: a single long word cannot, because the
+        // first word of a line is never wrapped whatever its length.
+        let exactly_two = format!("{} b", "a".repeat(PER_LINE - 2));
+        assert_eq!(exactly_two.chars().count(), PER_LINE);
+        assert_eq!(
+            into_lines(&exactly_two).len(),
+            1,
+            "a line exactly at the allowance should not wrap"
+        );
+
+        let one_more = format!("{} b", "a".repeat(PER_LINE - 1));
+        assert_eq!(one_more.chars().count(), PER_LINE + 1);
+        assert_eq!(into_lines(&one_more).len(), 2);
+
+        // And the space between two words is counted. Without it the measure
+        // is short by one per word and lines run past the edge.
+        let with_spaces = "bb ".repeat(PER_LINE / 3);
+        for line in into_lines(with_spaces.trim()) {
+            assert!(
+                line.chars().count() <= PER_LINE,
+                "the space between words was not counted: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_word_is_only_moved_down_when_it_actually_helps() {
+        // Moving the last word of the top line down is worth doing only if it
+        // makes the two lines closer in length and the bottom line still fits.
+        // Both conditions have to hold, and a caption that fails either is left
+        // exactly as it was.
+        let long_bottom = "x".repeat(PER_LINE - 2);
+        let mut lines = vec!["ab cd".to_string(), long_bottom.clone()];
+        let before = lines.clone();
+
+        bottom_heavy(&mut lines);
+
+        assert_eq!(
+            lines, before,
+            "moving a word down would have overflowed the bottom line"
+        );
+
+        // And where the two lines are already even, moving a word down makes
+        // the gap worse rather than better - so it is left alone even though
+        // the word would fit. The top line needs a space in it for this to
+        // reach the rule at all; without one there is no word to move and the
+        // function returns before deciding anything.
+        let mut even = vec!["a bb".to_string(), "cccc".to_string()];
+        let unchanged = even.clone();
+
+        bottom_heavy(&mut even);
+
+        assert_eq!(
+            even, unchanged,
+            "the word fits below but moving it widens the gap"
+        );
+    }
+
+    #[test]
+    fn a_heading_marker_is_taken_off_however_many_hashes_it_has() {
+        // Both loops. One eats the hashes and one eats the spaces after them,
+        // and either stopping after the first character leaves markup on screen
+        // in a headset.
+        assert_eq!(as_plain_text("### Docking"), "Docking");
+        assert_eq!(as_plain_text("#    Docking"), "Docking");
+        assert_eq!(as_plain_text("- Docking"), "Docking");
+
+        // And a hash that is not a marker stays, because it is not markup.
+        assert_eq!(as_plain_text("pad #7"), "pad #7");
+    }
+
     fn at(ms: u64) -> Duration {
         Duration::from_millis(ms)
     }

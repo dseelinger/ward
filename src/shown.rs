@@ -284,4 +284,17 @@ mod tests {
         );
         assert_eq!(shown.glance(), "Your ship: jump range is 42 light years");
     }
+
+    #[test]
+    fn named_values_with_nothing_in_them_say_so_rather_than_trailing_off() {
+        // Without the empty case this reads as a title, a colon, and then
+        // nothing - which spoken aloud is Ward starting a sentence and stopping
+        // partway through it.
+        let shown = Shown::Pairs {
+            title: "Your ship".to_string(),
+            pairs: Vec::new(),
+        };
+
+        assert_eq!(shown.spoken(), "Your ship is empty.");
+    }
 }

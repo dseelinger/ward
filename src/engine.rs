@@ -1449,6 +1449,111 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_key_bound_to_two_things_at_once_is_reported() {
+        // Reported rather than resolved. A Commander who deliberately put both
+        // on one key should not be argued with; one who did not needs to know
+        // before they hold it in the cockpit and the ship does something.
+        let (ward, _, mic, _) = engine(vec![]);
+
+        mic.send(listen::Voiced::Clash {
+            key: "Key_RightShift".into(),
+            actions: vec!["deploy hardpoints".into()],
+        })
+        .unwrap();
+
+        assert!(
+            until(|| ward
+                .view()
+                .problem
+                .as_deref()
+                .is_some_and(|p| p.contains("deploy hardpoints")))
+            .await,
+            "the clash was never surfaced: {:?}",
+            ward.view().problem
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn losing_the_microphone_says_so_rather_than_going_quiet() {
+        // The worst version of this is a Commander holding the key and being
+        // ignored with nothing on screen to explain it.
+        let (ward, _, mic, _) = engine(vec![]);
+
+        mic.send(listen::Voiced::Deaf("no capture device".into()))
+            .unwrap();
+
+        assert!(
+            until(|| ward
+                .view()
+                .problem
+                .as_deref()
+                .is_some_and(|p| p.contains("no capture device")))
+            .await,
+            "going deaf was never surfaced"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_question_asked_while_ward_is_answering_is_not_swallowed() {
+        // In a headset there is no text box to look at, so a question that goes
+        // nowhere is indistinguishable from not being heard at all.
+        let (ask, go) = dawdling("Working on it. ", "Done.");
+        let (ward, _, mic, _) = engine_asking(ask);
+
+        mic.send(listen::Voiced::Words("first question".into()))
+            .unwrap();
+
+        assert!(
+            until(|| ward.view().streaming).await,
+            "the turn never began"
+        );
+
+        mic.send(listen::Voiced::Words("second question".into()))
+            .unwrap();
+
+        assert!(
+            until(|| ward
+                .view()
+                .problem
+                .as_deref()
+                .is_some_and(|p| p.contains("still answering")))
+            .await,
+            "the second question vanished without a word"
+        );
+
+        go.notify_one();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nothing_is_asked_of_the_model_for_an_empty_question() {
+        let (ward, said, _, _) = engine(vec![
+            Event::Text("should never be said".into()),
+            Event::Done { stop_reason: None },
+        ]);
+
+        // Whitespace first, then something real. Asserting on the second is
+        // what makes this fast and what makes it mean anything: if the blank
+        // one had started a turn, the history would carry it.
+        ward.tell(Intent::Ask("   ".into()));
+        ward.tell(Intent::Tool("checklist_add", "something".into()));
+        ward.tell(Intent::Ask("a real question".into()));
+
+        assert!(
+            until(|| !said.lock().unwrap().is_empty()).await,
+            "the real question went unanswered"
+        );
+
+        let view = ward.view();
+        assert_eq!(
+            view.history.len(),
+            2,
+            "the blank question left something behind: {:?}",
+            view.history.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
+        assert_eq!(view.history[0].text, "a real question");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn holding_the_key_stops_ward_talking() {
         // Barge-in, on the engine's side of things. This used to need a frame
         // to be drawn between the key going down and the voice being cut.

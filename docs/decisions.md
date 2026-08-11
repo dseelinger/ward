@@ -61,15 +61,24 @@ more capable than the headset, because there is one implementation of both.
 Captions on their own layer, output only and ephemeral. A small panel that can
 be glanced at. A full panel at parity with the window.
 
-> open — captions ship; the panels do not.
-> [#13](https://github.com/dseelinger/ward/issues/13)
+> accepted — all three ship. Captions are their own overlay, output only and following the
+> head; the panel is a second overlay placed in the room, and mini and big are two modes of it
+> rather than two surfaces. Nothing enforces the count, and a fourth layer would be a new
+> overlay key and a new thread rather than a drift — the same argument D4 makes, for the same
+> reason.
 
 ## D6 — The big panel answers to voice, hotkey and controller
 
 Summoned and dismissed three ways, because a Commander in a headset should
 never have to reach for the one that is inconvenient.
 
-> open — [#13](https://github.com/dseelinger/ward/issues/13)
+> accepted — built, and unevenly testable, which is worth writing down rather than implying.
+> Voice goes through an ordinary capability and its tools are tested. The hotkey is a setting,
+> and a test holds it to a key name Ward can actually resolve, because a default it cannot is a
+> hotkey that silently never fires. The gesture is tested nowhere: it needs two tracked
+> controllers, and what it reads — a grip held within reach, then a hand still moving when it
+> lets go — cannot be produced without hands. That third is held by the manual suite and by
+> nothing else.
 
 ## D7 — Reachable without a microphone or a speaker
 
@@ -470,12 +479,13 @@ answer once hid four installable releases behind a confident green. Installs on
 the way out, so an installer window never appears over the game. Askable and
 actionable by voice.
 
-> open — two of the four. The three-way answer is built and tested, and it
-> installs on the way out rather than over the game. It is visible in the
-> window and not yet in the headset, which waits on the panel that will carry
-> it; and it cannot be asked for by voice, which wants the update state
-> reachable from a capability and is the piece that is genuinely unbuilt rather
-> than merely blocked.
+> open — three of the four. The three-way answer is built and tested, and it installs on the
+> way out rather than over the game. It is now visible in the headset as well as the window,
+> because the panel that was blocking it exists and draws the same notice from the same picture
+> — on the big panel where the window has it, and on the mini one whenever there is anything to
+> say. What remains is that it cannot be asked for by voice, which wants the update state
+> reachable from a capability and is the piece that is genuinely unbuilt rather than merely
+> blocked.
 > [#126](https://github.com/dseelinger/ward/issues/126)
 
 ## D45 — Three rules of repository discipline, and no more

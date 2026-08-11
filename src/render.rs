@@ -82,6 +82,8 @@ pub struct Renderer {
     pointer: Option<egui::Pos2>,
     pressed: bool,
     was_pressed: bool,
+    /// Scrolling that arrived since the last frame, waiting to be delivered.
+    scrolled: egui::Vec2,
 }
 
 impl Renderer {
@@ -151,6 +153,7 @@ impl Renderer {
             pointer: None,
             pressed: false,
             was_pressed: false,
+            scrolled: egui::Vec2::ZERO,
         })
     }
 
@@ -221,6 +224,73 @@ impl Renderer {
         &self.adapter_info
     }
 
+    /// How big the image currently is, in pixels.
+    #[must_use]
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    /// Draws into an image of a different size from now on.
+    ///
+    /// A texture cannot change size, so this makes a new one and lets the old go. That is why it
+    /// is called on a mode change rather than every frame.
+    ///
+    /// The mini panel needs this rather than being the big one shrunk. An overlay is scaled from
+    /// its image to its width in metres, so drawing four lines into a full-size image and hanging
+    /// it at a third of a metre gives text a third of the size — which is the one thing a surface
+    /// meant to be read at a glance cannot be.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if self.size == (width, height) {
+            return;
+        }
+
+        self.target = make_target(&self.device, width, height);
+        self.size = (width, height);
+    }
+
+    /// Where the Commander is pointing, in the image's own pixels, or `None` when the ray is not
+    /// on the panel at all.
+    ///
+    /// Pixels in and points out. The caller has an overlay measured in pixels and no reason to
+    /// know that egui lays out in something smaller, and [`SCALE`] is the conversion — it lives
+    /// here, so there is one place that knows it rather than two that have to agree.
+    pub fn point_at(&mut self, at: Option<(f32, f32)>) {
+        self.pointer = at.map(|(x, y)| egui::pos2(x / SCALE, y / SCALE));
+    }
+
+    /// Whether the trigger is held.
+    ///
+    /// Recorded rather than delivered. The edge is what egui is told about, and [`Self::draw`]
+    /// works out where the edge is — because a press and a release that both happened between two
+    /// frames still have to arrive as two events in the right order.
+    pub fn press(&mut self, down: bool) {
+        self.pressed = down;
+    }
+
+    /// Adds a wheel's worth of scrolling, to be delivered on the next frame.
+    ///
+    /// Accumulated rather than replaced. Several scroll events routinely arrive between two of
+    /// this panel's frames, and keeping only the last one would throw away most of a flick.
+    pub fn scroll(&mut self, x: f32, y: f32) {
+        self.scrolled += egui::vec2(x, y);
+    }
+
+    /// Runs one frame of egui, draws the result into the image, and hands back whatever the
+    /// widget tree decided.
+    ///
+    /// The panel's tree reports what the Commander asked for as its return value, and there is
+    /// nowhere else for that to come out: egui hands back the shapes it drew, not what the closure
+    /// thought.
+    pub fn draw_with<T>(&mut self, mut build: impl FnMut(&mut egui::Ui) -> T) -> T {
+        let mut decided = None;
+        self.draw(|ui| decided = Some(build(ui)));
+
+        // egui runs the closure exactly once per pass. If that ever stops being true this is a
+        // panic rather than a wrong answer, which is the right way round for a frame that was
+        // never drawn.
+        decided.expect("egui runs the widget tree once per frame")
+    }
+
     /// Runs one frame of egui and draws the result into the image.
     pub fn draw(&mut self, build: impl FnMut(&mut egui::Ui)) {
         let screen = ScreenDescriptor {
@@ -250,6 +320,21 @@ impl Renderer {
                 self.was_pressed = self.pressed;
             }
             None => events.push(egui::Event::PointerGone),
+        }
+
+        // Taken rather than read, so a wheel's turn is delivered once. Left in place it would be
+        // reapplied every frame and the panel would scroll forever from one flick.
+        let scrolled = std::mem::replace(&mut self.scrolled, egui::Vec2::ZERO);
+        if scrolled != egui::Vec2::ZERO {
+            events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: scrolled,
+                modifiers: egui::Modifiers::default(),
+                // Discrete wheel turns rather than a touchpad's stream, so there is no gesture
+                // with a beginning and an end for egui to track. `Move` is what egui documents
+                // for a phase that is not known.
+                phase: egui::TouchPhase::Move,
+            });
         }
 
         let input = egui::RawInput {

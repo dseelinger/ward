@@ -26,7 +26,12 @@ pub fn registry(settings: &crate::config::Settings, data_dir: &std::path::Path) 
 
     let checklist = crate::checklist::Checklist::load(&data_dir.join("checklist.md"));
 
-    Registry::new(vec![Box::new(Version), Box::new(honk), Box::new(checklist)])
+    Registry::new(vec![
+        Box::new(Version),
+        Box::new(honk),
+        Box::new(checklist),
+        Box::new(crate::panel::Panel),
+    ])
 }
 
 /// Reads the Commander's fire binding once, at startup.

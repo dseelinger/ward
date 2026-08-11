@@ -37,6 +37,7 @@ journal.rs       integration
 press.rs         integration
 replay.rs        integration
 secrets.rs       integration
+update.rs        integration
 
 # --- exempt -----------------------------------------------------------------
 #
@@ -50,9 +51,8 @@ listen.rs        exempt  opens a capture device and polls a key through the oper
 mic.rs           exempt  opens a capture device
 transcribe.rs    exempt  loads a half-gigabyte speech model that is not in the repository
 page.rs          exempt  draws the settings page, which needs a window
+surface.rs       exempt  is the widget tree both surfaces draw, so exercising it needs somewhere to draw it. What is not drawing - which mode a summon opens, what the mini panel says Ward is doing - is tested directly
 main.rs          exempt  is the window
 overlay.rs       exempt  needs a headset, or at least a Vulkan device
 render.rs        exempt  needs a graphics device
 vr.rs            exempt  needs SteamVR running
-
-update.rs        integration

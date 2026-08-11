@@ -139,6 +139,10 @@ fn is_audio(headers: &[u8]) -> bool {
 }
 
 /// One voice the service offers.
+///
+/// Cloned because the list is published in the engine's picture of itself, and
+/// a picture is a copy rather than a borrow of the thing it depicts.
+#[derive(Clone)]
 pub struct Voice {
     /// What the setting stores, such as `en-US-AndrewNeural`.
     pub name: String,

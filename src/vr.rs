@@ -6,9 +6,17 @@
 //! Elite renders VR through OpenVR natively and never calls OpenXR, so this is the only door
 //! into the headset that will actually open. An OpenXR layer would sit there and never fire.
 //!
-//! What is here is what captions need: start once, own one overlay, put a picture in it and
-//! hold it in front of the Commander. Controllers, pointing and anything movable belong to the
-//! panel, which is its own piece of work.
+//! What is here is what captions and the panel need: start once, own the overlays, put a picture
+//! in each and place it — in front of the Commander for a caption, out in the room for a panel
+//! that can be pointed at.
+//!
+//! # Pointing is mouse input, and that is not a compromise
+//!
+//! SteamVR turns a controller ray into overlay mouse events, so an interactive overlay is handed
+//! a cursor position and a button. That is exactly what egui wants, which is what makes one
+//! widget tree able to serve a window and a headset without either knowing about the other. The
+//! only translation is the Y axis, which OpenVR counts from the bottom and every toolkit counts
+//! from the top.
 //!
 //! # Once, and only once
 //!
@@ -75,6 +83,37 @@ impl std::error::Error for Error {}
 /// A running OpenVR session. Dropping it shuts OpenVR down and frees the process to start again.
 pub struct Vr {
     overlay: &'static sys::VR_IVROverlay_FnTable,
+    system: &'static sys::VR_IVRSystem_FnTable,
+}
+
+/// Something that happened on an overlay, already in the toolkit's terms.
+///
+/// Translated here rather than passed on raw, so nothing above this file has to know that OpenVR
+/// counts Y from the bottom or spells a button as an integer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Event {
+    /// Where the ray is pointing, in the overlay's own pixels, measured from the top left.
+    Moved { x: f32, y: f32 },
+    /// The trigger, down or up.
+    Button { down: bool },
+    /// A scroll wheel's worth of turn.
+    Scrolled { x: f32, y: f32 },
+    /// The ray left the overlay entirely, so there is nothing being pointed at.
+    Left,
+}
+
+/// Where a controller is, and what is held down on it.
+#[derive(Clone, Copy, Debug)]
+pub struct Controller {
+    /// Where it is in the room, in metres.
+    pub at: glam::Vec3,
+    /// How fast it is moving, in metres per second. What a flick is made of.
+    pub speed: glam::Vec3,
+    /// Whether the grip is squeezed, which is the only button read here.
+    ///
+    /// The trigger is deliberately absent. SteamVR already delivers it as an overlay mouse click,
+    /// and reading it a second time here would be one press understood as two things.
+    pub grip: bool,
 }
 
 impl Vr {
@@ -113,8 +152,8 @@ impl Vr {
         // The compositor is checked for and then dropped. Nothing calls it: the one method that
         // did asked what Vulkan device extensions it wants, and nothing could inject them. Its
         // absence still means no compositing, so this is the honest place to find that out.
-        let overlay = match (system, overlay, compositor) {
-            (Some(_), Some(overlay), Some(_)) => overlay,
+        let (system, overlay) = match (system, overlay, compositor) {
+            (Some(system), Some(overlay), Some(_)) => (system, overlay),
             (None, ..) => {
                 shutdown();
                 return Err(Error::MissingInterface("system interface"));
@@ -129,7 +168,99 @@ impl Vr {
             }
         };
 
-        Ok(Self { overlay })
+        Ok(Self { overlay, system })
+    }
+
+    /// Where the headset is in the room, or `None` if it has not been found yet.
+    ///
+    /// This is what a summoned panel is placed against: it appears where the Commander is
+    /// looking at the moment they ask for it, and then stays there while they look away. A panel
+    /// that followed the head would be one you cannot look away from, which is the opposite of
+    /// what a panel is for and the reason captions are the only thing that does follow.
+    #[must_use]
+    pub fn head(&self) -> Option<Affine3A> {
+        self.poses().first().copied().flatten()
+    }
+
+    /// Every controller SteamVR currently knows about.
+    ///
+    /// Returned as a list rather than as a left and a right, because which hand a controller is
+    /// in is a question this does not need to ask: a grab is a grab from either.
+    #[must_use]
+    pub fn controllers(&self) -> Vec<Controller> {
+        let poses = self.poses_raw();
+        let mut found = Vec::new();
+
+        let Some(class_of) = self.system.GetTrackedDeviceClass else {
+            return found;
+        };
+        let Some(state_of) = self.system.GetControllerState else {
+            return found;
+        };
+
+        for (index, pose) in poses.iter().enumerate() {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the array is 64 long and indexed by a u32 everywhere in OpenVR"
+            )]
+            let index = index as u32;
+
+            if !pose.bPoseIsValid
+                || unsafe { class_of(index) }
+                    != sys::ETrackedDeviceClass_TrackedDeviceClass_Controller
+            {
+                continue;
+            }
+
+            let mut state = sys::VRControllerState_t::default();
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the struct is far smaller than a u32 can count"
+            )]
+            let size = std::mem::size_of::<sys::VRControllerState_t>() as u32;
+
+            if !unsafe { state_of(index, &raw mut state, size) } {
+                continue;
+            }
+
+            let held = |button: sys::EVRButtonId| state.ulButtonPressed & (1u64 << button) != 0;
+            let placed = from_openvr(pose.mDeviceToAbsoluteTracking);
+            let velocity = pose.vVelocity.v;
+
+            found.push(Controller {
+                at: placed.translation.into(),
+                speed: glam::Vec3::new(velocity[0], velocity[1], velocity[2]),
+                grip: held(sys::EVRButtonId_k_EButton_Grip),
+            });
+        }
+
+        found
+    }
+
+    /// Every device's pose, as a transform, with the invalid ones blanked out.
+    fn poses(&self) -> Vec<Option<Affine3A>> {
+        self.poses_raw()
+            .iter()
+            .map(|pose| {
+                pose.bPoseIsValid
+                    .then(|| from_openvr(pose.mDeviceToAbsoluteTracking))
+            })
+            .collect()
+    }
+
+    fn poses_raw(&self) -> Vec<sys::TrackedDevicePose_t> {
+        let mut poses = vec![sys::TrackedDevicePose_t::default(); DEVICES as usize];
+
+        if let Some(get) = self.system.GetDeviceToAbsoluteTrackingPose {
+            unsafe {
+                // No prediction. A panel is furniture rather than a thing being aimed, and asking
+                // for where a device will be by the time the photons land buys nothing but jitter
+                // when the answer is used to decide whether somebody grabbed something.
+                get(STANDING, 0.0, poses.as_mut_ptr(), DEVICES);
+            }
+        }
+
+        poses
     }
 
     /// Creates an overlay and shows it.
@@ -269,6 +400,166 @@ impl Overlay<'_> {
         })
     }
 
+    /// Places the overlay in the room, rather than on the Commander.
+    ///
+    /// The other half of [`Self::follow_head`], and the difference between a caption and a panel.
+    /// A caption appears where you are already looking and goes away; a panel is put somewhere and
+    /// stays there, so you can look at the station and then look back at it.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the call is refused.
+    pub fn place(&self, pose: Affine3A) -> Result<(), Error> {
+        let set = self
+            .table
+            .SetOverlayTransformAbsolute
+            .ok_or(Error::MissingInterface("SetOverlayTransformAbsolute"))?;
+        let mut matrix = to_openvr(pose);
+        check("SetOverlayTransformAbsolute", unsafe {
+            set(self.handle, STANDING, &raw mut matrix)
+        })
+    }
+
+    /// Lets the Commander point at this overlay and click it.
+    ///
+    /// `width` and `height` are the pixel size of the image being drawn, and they are what the
+    /// mouse scale is set to — so the positions that come back out of [`Self::events`] are in the
+    /// same pixels the picture was drawn in, and nothing downstream has to convert between two
+    /// coordinate systems it did not choose.
+    ///
+    /// # Errors
+    ///
+    /// Fails if any of the three calls is refused.
+    pub fn take_input(&self, width: u32, height: u32) -> Result<(), Error> {
+        let method = self
+            .table
+            .SetOverlayInputMethod
+            .ok_or(Error::MissingInterface("SetOverlayInputMethod"))?;
+        check("SetOverlayInputMethod", unsafe {
+            method(self.handle, sys::VROverlayInputMethod_Mouse)
+        })?;
+
+        let scale = self
+            .table
+            .SetOverlayMouseScale
+            .ok_or(Error::MissingInterface("SetOverlayMouseScale"))?;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "an overlay wider than 16 million pixels is not a case"
+        )]
+        let mut size = sys::HmdVector2_t {
+            v: [width as f32, height as f32],
+        };
+        check("SetOverlayMouseScale", unsafe {
+            scale(self.handle, &raw mut size)
+        })?;
+
+        let flag = self
+            .table
+            .SetOverlayFlag
+            .ok_or(Error::MissingInterface("SetOverlayFlag"))?;
+
+        // Without this the panel is a picture. SteamVR only sends mouse events to an overlay it
+        // has been told is worth pointing at, and the failure is silent: the ray goes through it
+        // and nothing ever arrives.
+        check("SetOverlayFlag", unsafe {
+            flag(
+                self.handle,
+                sys::VROverlayFlags_MakeOverlaysInteractiveIfVisible,
+                true,
+            )
+        })?;
+
+        // A settings page and a conversation both scroll, and without this the wheel does nothing
+        // at all in the headset while working perfectly in the window — which is exactly the kind
+        // of quiet divergence between the two surfaces that D4 exists to prevent.
+        check("SetOverlayFlag", unsafe {
+            flag(
+                self.handle,
+                sys::VROverlayFlags_SendVRDiscreteScrollEvents,
+                true,
+            )
+        })
+    }
+
+    /// Everything that has happened on this overlay since the last time it was asked.
+    ///
+    /// Drained rather than sampled. SteamVR queues these, and reading one per frame at the panel's
+    /// redraw rate would put the pointer behind the ray by however many events were skipped —
+    /// which reads as a cursor that lags and then catches up in a jump.
+    #[must_use]
+    pub fn events(&self, height: u32) -> Vec<Event> {
+        let mut out = Vec::new();
+
+        let Some(poll) = self.table.PollNextOverlayEvent else {
+            return out;
+        };
+
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the event struct is far smaller than a u32 can count"
+        )]
+        let size = std::mem::size_of::<sys::VREvent_t>() as u32;
+
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "an overlay taller than 16 million pixels is not a case"
+        )]
+        let tall = height as f32;
+
+        // OpenVR declares the event kinds as signed and reports them as unsigned in the same
+        // struct. Narrowed here, once, rather than at each of the five comparisons below.
+        const MOVED: u32 = sys::EVREventType_VREvent_MouseMove.cast_unsigned();
+        const DOWN: u32 = sys::EVREventType_VREvent_MouseButtonDown.cast_unsigned();
+        const UP: u32 = sys::EVREventType_VREvent_MouseButtonUp.cast_unsigned();
+        const DISCRETE: u32 = sys::EVREventType_VREvent_ScrollDiscrete.cast_unsigned();
+        const SMOOTH: u32 = sys::EVREventType_VREvent_ScrollSmooth.cast_unsigned();
+        const LEFT: u32 = sys::EVREventType_VREvent_FocusLeave.cast_unsigned();
+        const TRIGGER: u32 = sys::EVRMouseButton_VRMouseButton_Left.cast_unsigned();
+
+        let mut event = sys::VREvent_t::default();
+
+        while unsafe { poll(self.handle, &raw mut event, size) } {
+            // SAFETY: the union is read according to the event type that named it, which is the
+            // only thing that says which arm is live.
+            let translated = match event.eventType {
+                MOVED => {
+                    let mouse = unsafe { event.data.mouse };
+                    // OpenVR counts Y from the bottom of the overlay and every toolkit counts it
+                    // from the top. Left unflipped, the panel works perfectly upside down: the
+                    // pointer is on the settings tab while the ray is on the compose box.
+                    Some(Event::Moved {
+                        x: mouse.x,
+                        y: tall - mouse.y,
+                    })
+                }
+                DOWN | UP => {
+                    let mouse = unsafe { event.data.mouse };
+
+                    // Only the trigger. A controller reports its other buttons through the same
+                    // event, and treating them all as a click means the grip that grabs the panel
+                    // also presses whatever the ray happened to be over.
+                    (mouse.button == TRIGGER).then_some(Event::Button {
+                        down: event.eventType == DOWN,
+                    })
+                }
+                DISCRETE | SMOOTH => {
+                    let scroll = unsafe { event.data.scroll };
+                    Some(Event::Scrolled {
+                        x: scroll.xdelta,
+                        y: scroll.ydelta,
+                    })
+                }
+                LEFT => Some(Event::Left),
+                _ => None,
+            };
+
+            out.extend(translated);
+        }
+
+        out
+    }
+
     /// Puts the overlay on screen.
     ///
     /// # Errors
@@ -353,6 +644,15 @@ unsafe fn interface<T>(version: &[u8]) -> Option<&'static T> {
 /// The headset itself, which is always device zero.
 const HMD: u32 = sys::k_unTrackedDeviceIndex_Hmd;
 
+/// How many devices OpenVR can track at once, which is the size of every pose array it fills.
+const DEVICES: u32 = sys::k_unMaxTrackedDeviceCount;
+
+/// Room scale, so a panel put down stays where it was put.
+///
+/// The seated origin moves when the Commander recenters, which would take the panel with it.
+const STANDING: sys::ETrackingUniverseOrigin =
+    sys::ETrackingUniverseOrigin_TrackingUniverseStanding;
+
 fn shutdown() {
     unsafe { sys::VR_ShutdownInternal() };
     RUNNING.store(false, Ordering::SeqCst);
@@ -372,6 +672,21 @@ fn init_error_text(error: sys::EVRInitError) -> String {
             .to_string_lossy()
             .into_owned()
     }
+}
+
+/// OpenVR to glam, the other way round from [`to_openvr`].
+///
+/// The two are next to each other because a transposition mistake in either is invisible until
+/// something is in the wrong place in a headset, and having both in view is most of what stops
+/// one of them being written the wrong way round.
+fn from_openvr(matrix: sys::HmdMatrix34_t) -> Affine3A {
+    let m = matrix.m;
+    Affine3A::from_cols(
+        glam::Vec3::new(m[0][0], m[1][0], m[2][0]).into(),
+        glam::Vec3::new(m[0][1], m[1][1], m[2][1]).into(),
+        glam::Vec3::new(m[0][2], m[1][2], m[2][2]).into(),
+        glam::Vec3::new(m[0][3], m[1][3], m[2][3]).into(),
+    )
 }
 
 /// glam to OpenVR. `HmdMatrix34_t` is row major, three rows of four.

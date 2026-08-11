@@ -33,7 +33,7 @@ use crate::capability::Registry;
 use crate::captions::Captions;
 use crate::config::Settings;
 use crate::speech::{Act, Arbiter, Body, Register, Speaker};
-use crate::{capabilities, config, diag, journal, listen, shown, update, voice};
+use crate::{capabilities, config, diag, journal, listen, secrets, shown, update, voice};
 
 /// How long the voice service gets to answer before Ward gives up on a piece.
 ///
@@ -87,15 +87,31 @@ pub type Speak = Arc<
         + Sync,
 >;
 
-/// What the Commander asked for, on its way in from the window.
+/// What the Commander asked for, on its way in from a surface.
 pub enum Intent {
     /// A typed question.
     Ask(String),
     /// The settings changed. The whole set, because the engine rebuilds from
     /// them rather than tracking which one moved.
     Settings(Box<Settings>),
+    /// One setting, changed on a page that no longer holds its own copy.
+    ///
+    /// The whole-set variant above still exists for the window's own use, but a
+    /// surface drawn from the published picture has no set of its own to send:
+    /// it says which row moved and where to, and the engine is the only thing
+    /// holding the answer. That is what stops two surfaces disagreeing about
+    /// what a setting is.
+    Set(&'static str, serde_json::Value),
+    /// Put one setting back to what Ward ships.
+    Clear(&'static str),
     /// A key was stored, so there is a model to talk to now.
     Key(String),
+    /// Fetch the list of voices, so one can be chosen rather than typed.
+    Voices,
+    /// Fetch the list of models the stored key can reach.
+    Models,
+    /// Run the setup test: open the devices, read the folders, try the key.
+    TestSetup,
     /// Speak this so it can be heard before being committed to. Straight to the
     /// voice rather than onto the speech stream: this is the Commander
     /// auditioning a voice, not Ward saying something.
@@ -115,6 +131,50 @@ enum News {
     /// An installer, downloaded and proved to be the file the release
     /// published, or why not.
     Fetched(Result<std::path::PathBuf, String>),
+    /// The voice list came back, or would not.
+    Voices(Result<Vec<voice::Voice>, String>),
+    /// The model list came back, or would not.
+    Models(Result<Vec<String>, String>),
+    /// The setup test finished.
+    Checks(Vec<Check>),
+}
+
+/// A list that has to be fetched, and what happened when it was.
+///
+/// Never fails hard. When the list cannot be had, the surface says why and the
+/// field becomes an ordinary text box with the current value still in it —
+/// because an empty dropdown is a setting the Commander can no longer change,
+/// and that is worse than one they have to type.
+///
+/// It lives here rather than beside the page it draws, because there are two
+/// pages now and only one engine. A surface that held its own copy would be a
+/// list fetched twice and answered once.
+#[derive(Clone, Default)]
+pub enum Listing<T> {
+    /// Not asked for yet.
+    #[default]
+    Unasked,
+    Asking,
+    Have(T),
+    /// Carries why, because a control that silently becomes a text box looks
+    /// like a bug rather than a fallback.
+    Refused(String),
+}
+
+impl<T> Listing<T> {
+    /// Whether asking again would be asking twice at once.
+    #[must_use]
+    pub fn idle(&self) -> bool {
+        !matches!(self, Listing::Asking)
+    }
+}
+
+/// One thing checked by the setup test.
+#[derive(Clone)]
+pub struct Check {
+    pub what: &'static str,
+    pub ok: bool,
+    pub detail: String,
 }
 
 /// Where Ward has got to with a new version.
@@ -141,11 +201,16 @@ pub enum Update {
     Failed(String),
 }
 
-/// What the window draws.
+/// What a surface draws.
 ///
-/// A picture rather than the thing itself. The window holds no conversation, no
-/// checklist and no journal of its own, so there is nothing for the two of them
-/// to disagree about.
+/// A picture rather than the thing itself. No surface holds a conversation, a
+/// checklist, a journal or a setting of its own, so there is nothing for any
+/// two of them to disagree about.
+///
+/// **That is what makes the headset possible.** There is one picture and one
+/// way to act on it, so the window and the panel are two viewers rather than
+/// two implementations — and the window cannot become more capable than the
+/// headset without the extra capability having nowhere to live.
 #[derive(Default)]
 pub struct View {
     pub history: Vec<Message>,
@@ -162,6 +227,28 @@ pub struct View {
     pub panels: Vec<shown::Shown>,
     /// Where a newer Ward has got to.
     pub update: Update,
+
+    /// What every setting currently is. Published rather than held by the page,
+    /// because there are two pages and one truth.
+    pub settings: Settings,
+    /// Whether there is a key, which is all any surface is ever told about it.
+    /// The key itself never comes back out.
+    pub key_stored: bool,
+    /// Why the last attempt to store one did not work.
+    pub key_problem: Option<String>,
+    pub voices: Listing<Vec<voice::Voice>>,
+    pub models: Listing<Vec<String>>,
+    /// What the setup test found, and whether it is still running.
+    pub checks: Vec<Check>,
+    pub testing: bool,
+
+    /// How many times the panel has been asked for out loud, and what for.
+    ///
+    /// Published rather than acted on. The engine does not know whether there is a headset and
+    /// must not have an opinion about one — it carries the request to whatever can answer it, the
+    /// same way it carries everything else to a surface it cannot see.
+    pub panel_asks: u64,
+    pub panel_wanted: crate::panel::Mode,
 }
 
 /// The window's end of the engine.
@@ -255,6 +342,15 @@ pub struct Engine {
     news: UnboundedSender<News>,
     heard_news: Option<UnboundedReceiver<News>>,
 
+    /// What the settings page shows, which used to live on the window thread
+    /// and could therefore only ever be drawn there.
+    key_stored: bool,
+    key_problem: Option<String>,
+    voices: Listing<Vec<voice::Voice>>,
+    models: Listing<Vec<String>>,
+    checks: Vec<Check>,
+    testing: bool,
+
     gear: Gear,
     view: Arc<Mutex<Arc<View>>>,
 }
@@ -297,6 +393,9 @@ impl Engine {
 
         let (news, heard_news) = unbounded_channel();
 
+        // Read before the client is moved into the struct below.
+        let client_present = client.is_some();
+
         let mut engine = Self {
             settings,
             registry,
@@ -324,6 +423,14 @@ impl Engine {
             newer: None,
             news,
             heard_news: Some(heard_news),
+            // A client here means a key was loaded and accepted at startup,
+            // which is the same question the surfaces ask.
+            key_stored: client_present,
+            key_problem: None,
+            voices: Listing::Unasked,
+            models: Listing::Unasked,
+            checks: Vec::new(),
+            testing: false,
             gear,
             view: Arc::new(Mutex::new(Arc::new(View::default()))),
         };
@@ -544,6 +651,25 @@ impl Engine {
                 tracing::warn!(target: "ward::update", reason = %why, "could not fetch");
                 self.update = Update::Failed(why);
             }
+            News::Voices(Ok(voices)) => {
+                tracing::info!(target: "ward::voice", voices = voices.len(), "voice list");
+                self.voices = Listing::Have(voices);
+            }
+            News::Voices(Err(why)) => {
+                tracing::warn!(target: "ward::voice", error = %why, "no voice list");
+                self.voices = Listing::Refused(why);
+            }
+            News::Models(Ok(models)) => {
+                self.models = Listing::Have(models);
+            }
+            News::Models(Err(why)) => {
+                tracing::warn!(target: "ward::model", error = %why, "no model list");
+                self.models = Listing::Refused(why);
+            }
+            News::Checks(checks) => {
+                self.testing = false;
+                self.checks = checks;
+            }
         }
 
         true
@@ -590,13 +716,93 @@ impl Engine {
                     );
                 }
             }
+            Intent::Set(key, value) => {
+                let mut settings = self.settings.clone();
+                settings.set(key, value);
+                return self.intent(Intent::Settings(Box::new(settings)));
+            }
+            Intent::Clear(key) => {
+                let mut settings = self.settings.clone();
+                settings.clear(key);
+                return self.intent(Intent::Settings(Box::new(settings)));
+            }
             Intent::Key(key) => {
-                self.client = Some(Client::new(
-                    key,
-                    self.settings.string("model"),
-                    self.registry.clone(),
-                ));
-                self.rewire();
+                // Stored here rather than by whoever took it, because a surface
+                // in a headset has no business handling a secret and there are
+                // two surfaces now. One place stores it, one place knows whether
+                // there is one, and neither surface can read it back.
+                match secrets::store(&secrets::key_path(&config::data_dir()), &key) {
+                    Ok(()) => {
+                        tracing::info!(target: "ward::secrets", "key stored");
+                        self.key_stored = true;
+                        self.key_problem = None;
+                        // A new key means a different list of models, and the old
+                        // one was answered for a key that is no longer in use.
+                        self.models = Listing::Unasked;
+
+                        self.client = Some(Client::new(
+                            key,
+                            self.settings.string("model"),
+                            self.registry.clone(),
+                        ));
+                        self.rewire();
+                    }
+                    Err(e) => {
+                        tracing::error!(target: "ward::secrets", error = %e, "could not store key");
+                        self.key_problem = Some(e.to_string());
+                    }
+                }
+            }
+            Intent::Voices => {
+                if !self.voices.idle() {
+                    return false;
+                }
+
+                self.voices = Listing::Asking;
+                let news = self.news.clone();
+
+                tokio::spawn(async move {
+                    let got = voice::voices().await.map_err(|e| e.to_string());
+                    let _ = news.send(News::Voices(got));
+                });
+            }
+            Intent::Models => {
+                if !self.models.idle() {
+                    return false;
+                }
+
+                self.models = Listing::Asking;
+                let news = self.news.clone();
+
+                tokio::spawn(async move {
+                    // Read here rather than kept, so a key rotated since startup
+                    // is the one the list is asked for.
+                    let key = secrets::load(&secrets::key_path(&config::data_dir()))
+                        .ok()
+                        .flatten();
+
+                    let got = match key {
+                        Some(key) => crate::anthropic::models(&key).await,
+                        None => Err("there is no key stored yet".to_string()),
+                    };
+
+                    let _ = news.send(News::Models(got));
+                });
+            }
+            Intent::TestSetup => {
+                if self.testing {
+                    return false;
+                }
+
+                self.testing = true;
+                self.checks.clear();
+
+                let news = self.news.clone();
+                let settings = self.settings.clone();
+
+                tokio::spawn(async move {
+                    let _ = news.send(News::Checks(check_setup(&settings).await));
+                });
             }
             Intent::Preview(text) => {
                 let voice = self.settings.string("voice");
@@ -949,6 +1155,15 @@ impl Engine {
                 .filter_map(|c| c.display())
                 .collect(),
             update: self.update.clone(),
+            settings: self.settings.clone(),
+            key_stored: self.key_stored,
+            key_problem: self.key_problem.clone(),
+            voices: self.voices.clone(),
+            models: self.models.clone(),
+            checks: self.checks.clone(),
+            testing: self.testing,
+            panel_asks: crate::panel::asks(),
+            panel_wanted: crate::panel::wanted(),
         });
 
         match self.view.lock() {
@@ -956,6 +1171,115 @@ impl Engine {
             Err(poisoned) => *poisoned.into_inner() = view,
         }
     }
+}
+
+/// Checks the things that fail quietly.
+///
+/// Every one of these stands for an evening somebody could otherwise lose. A
+/// microphone that was never chosen, a key that was refused, a journal folder
+/// pointing at nothing — none of them announce themselves. They present as Ward
+/// simply not working, in a cockpit, with no way to tell which of five things
+/// is wrong.
+///
+/// Each check does the real thing rather than inspecting a setting. Opening the
+/// device is the only way to learn that it opens.
+///
+/// It lives here rather than beside the window because the headset asks the same
+/// question, and a Commander who cannot find out why nothing is happening is in
+/// the worst position of all when they cannot take the headset off to look.
+async fn check_setup(settings: &Settings) -> Vec<Check> {
+    let mut checks = Vec::new();
+
+    checks.push(match crate::mic::Microphone::open() {
+        Ok(_) => Check {
+            what: "Microphone",
+            ok: true,
+            detail: "Windows handed Ward a recording device and it started.".to_string(),
+        },
+        Err(e) => Check {
+            what: "Microphone",
+            ok: false,
+            detail: format!("{e:#}"),
+        },
+    });
+
+    checks.push(match voice::speakers() {
+        Ok(name) => Check {
+            what: "Speakers",
+            ok: true,
+            detail: format!("Ward will speak through {name}."),
+        },
+        Err(e) => Check {
+            what: "Speakers",
+            ok: false,
+            detail: format!("{e:#}"),
+        },
+    });
+
+    let model = settings.file("speech model", &config::data_dir());
+    checks.push(Check {
+        what: "Speech model",
+        ok: model.is_file(),
+        detail: match model.is_file() {
+            true => format!("Found at {}.", model.display()),
+            false => format!(
+                "Nothing at {}. Ward cannot hear you until a model file is there.",
+                model.display()
+            ),
+        },
+    });
+
+    let folder = std::path::PathBuf::from(settings.string("journal folder"));
+    checks.push(match journal::newest(&folder) {
+        Some(file) => Check {
+            what: "Elite's journal",
+            ok: true,
+            detail: format!(
+                "Reading {}.",
+                file.file_name().unwrap_or_default().to_string_lossy()
+            ),
+        },
+        None => Check {
+            what: "Elite's journal",
+            ok: false,
+            detail: format!(
+                "No journal in {}. Ward will not know where you are. This is \
+                 expected if the game has never run on this machine.",
+                folder.display()
+            ),
+        },
+    });
+
+    // Last, because it is the only one that touches the network, and a
+    // Commander reading down the list should have the local answers already.
+    let stored = secrets::load(&secrets::key_path(&config::data_dir()));
+
+    checks.push(match stored {
+        Ok(Some(key)) => match crate::anthropic::models(&key).await {
+            Ok(models) => Check {
+                what: "API key",
+                ok: true,
+                detail: format!("Accepted. {} models available to it.", models.len()),
+            },
+            Err(why) => Check {
+                what: "API key",
+                ok: false,
+                detail: why,
+            },
+        },
+        Ok(None) => Check {
+            what: "API key",
+            ok: false,
+            detail: "No key stored. Ward can hear you and cannot answer.".to_string(),
+        },
+        Err(e) => Check {
+            what: "API key",
+            ok: false,
+            detail: format!("{e:#}"),
+        },
+    });
+
+    checks
 }
 
 /// Wires the channels and puts the engine on the runtime it is called from.

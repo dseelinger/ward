@@ -210,6 +210,7 @@ pub fn all() -> Vec<&'static Row> {
         .chain(crate::honk::SETTINGS)
         .chain(crate::checklist::SETTINGS)
         .chain(crate::update::SETTINGS)
+        .chain(crate::panel::SETTINGS)
         .collect()
 }
 

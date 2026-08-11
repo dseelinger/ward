@@ -167,4 +167,170 @@ mod tests {
         assert_eq!(answer, format!("Ward {}", env!("CARGO_PKG_VERSION")));
         assert!(answer.contains('.'), "should look like a version: {answer}");
     }
+
+    // --- documentation -------------------------------------------------------
+    //
+    // A capability is not complete until its page exists, and these are what
+    // make that true rather than merely encouraged. They run against the real
+    // registry - the application's own, not a second list - so a capability
+    // wired up without a page fails the build that wired it up.
+    //
+    // What they cannot check is whether the prose is any good. That is a
+    // person's job, and it is deliberately not a gate: a review that blocks a
+    // merge turns writing into paperwork. These check the facts underneath it.
+
+    /// Where a capability's page lives, derived from its id.
+    fn page_of(id: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/capabilities")
+            .join(format!("{id}.md"))
+    }
+
+    fn pages() -> Vec<(String, String)> {
+        test_registry()
+            .capabilities()
+            .iter()
+            .map(|c| {
+                let path = page_of(c.id());
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                (c.id().to_string(), text)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_capability_has_a_page() {
+        let registry = test_registry();
+
+        // A discovery test that finds nothing passes, which is the one failure
+        // this whole family exists to catch.
+        assert!(!registry.capabilities().is_empty());
+
+        for capability in registry.capabilities() {
+            let path = page_of(capability.id());
+            assert!(
+                path.is_file(),
+                "{} has no documentation page. Write {}.",
+                capability.id(),
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn every_page_belongs_to_a_capability() {
+        // The other direction. A page for something that was renamed or removed
+        // is a page nobody will notice is lying.
+        let registry = test_registry();
+        let known: Vec<&str> = registry.capabilities().iter().map(|c| c.id()).collect();
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/capabilities");
+        let entries = std::fs::read_dir(&dir).expect("no docs/capabilities directory");
+
+        let mut found = 0;
+
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+
+            found += 1;
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+
+            assert!(
+                known.contains(&stem.as_ref()),
+                "{} documents no registered capability",
+                path.display()
+            );
+        }
+
+        assert!(found > 0, "no capability pages were found at all");
+    }
+
+    #[test]
+    fn every_page_quotes_something_real() {
+        // A mechanical stand-in for a rule that cannot be checked directly:
+        // write from artifacts, never from the feature name. A page that cannot
+        // quote real output, a real setting or a real event is a page written
+        // from an idea of the feature rather than from the feature.
+        for (id, text) in pages() {
+            assert!(
+                text.contains("```") || text.contains("\n> "),
+                "{id}'s page quotes nothing real - no code block and no output"
+            );
+        }
+    }
+
+    /// Reads the declaration blocks at the foot of a page.
+    ///
+    /// `<!-- default: auto honk = false -->` is a claim the page makes, in a
+    /// form that can be checked against the code that actually ships it.
+    fn declared_defaults(text: &str) -> Vec<(String, String)> {
+        text.lines()
+            .filter_map(|line| {
+                let inner = line
+                    .trim()
+                    .strip_prefix("<!-- default:")?
+                    .strip_suffix("-->")?;
+                let (key, value) = inner.split_once('=')?;
+                Some((key.trim().to_string(), value.trim().to_string()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn documented_defaults_match_the_code() {
+        // Four settings were once documented with the wrong default, two of
+        // them in prose, including one described as opt-in on every page while
+        // shipping switched on.
+        let mut checked = 0;
+
+        for (id, text) in pages() {
+            for (key, claimed) in declared_defaults(&text) {
+                let Some(actual) = crate::config::default_setting(&key) else {
+                    panic!("{id}'s page declares a default for \"{key}\", which is not a setting");
+                };
+
+                assert_eq!(
+                    actual.to_string(),
+                    claimed,
+                    "{id}'s page says \"{key}\" defaults to {claimed}, and it ships as {actual}"
+                );
+
+                checked += 1;
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "no page declared a default, so nothing was checked"
+        );
+    }
+
+    #[test]
+    fn a_page_that_claims_a_default_declares_it() {
+        // Otherwise the check above is trivially satisfied by never writing a
+        // declaration block, and the prose goes back to being unverifiable.
+        for (id, text) in pages() {
+            let claims = [
+                "by default",
+                "defaults to",
+                "default is",
+                "unless you turn it on",
+            ]
+            .iter()
+            .any(|phrase| text.to_lowercase().contains(phrase));
+
+            if claims {
+                assert!(
+                    !declared_defaults(&text).is_empty(),
+                    "{id}'s page talks about a default without declaring one, \
+                     so nothing checks the claim. Add a line like \
+                     <!-- default: auto honk = false --> at the foot of it."
+                );
+            }
+        }
+    }
 }

@@ -52,7 +52,7 @@ pub fn data_dir() -> PathBuf {
 /// Keys are spelled the way a person would say them out loud, because the same
 /// string is the name in the settings page, the name in help, and the name in
 /// the message about a rejected file.
-fn default_setting(key: &str) -> Option<Value> {
+pub fn default_setting(key: &str) -> Option<Value> {
     match key {
         "model" => Some(json!(crate::anthropic::DEFAULT_MODEL)),
         // Chosen to be readable on a high-resolution display without anyone

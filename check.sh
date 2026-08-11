@@ -90,4 +90,43 @@ check_list "$LOCAL" || status=1
 
 [ "$status" -eq 0 ] && echo "    ok"
 
+# --- the installer keeps the data folder --------------------------------------
+#
+# Everything the Commander owns lives in one folder beside the executable:
+# their settings, their checklist, their key, their logs. An upgrade replaces
+# the program and must not touch it, and an uninstall takes the program and
+# leaves it behind.
+#
+# This is free and static, so it runs on every change rather than only on the
+# path that ships. The failure it prevents is not subtle - it is somebody's
+# settings and stored key disappearing under a version bump - but it is
+# invisible until a second release exists, which is exactly too late.
+
+echo "==> the installer keeps the data folder"
+
+SETUP="installer/ward.iss"
+
+if [ ! -f "$SETUP" ]; then
+    echo "    FAIL: no installer script at $SETUP" >&2
+    exit 1
+fi
+
+# The declaration has to name the folder and mark it as surviving an uninstall,
+# on one line, because that is how Inno Setup reads it.
+if ! grep -qE '^Name: *"\{app\}\\data".*uninsneveruninstall' "$SETUP"; then
+    echo "    FAIL: $SETUP does not declare {app}\\data as surviving an uninstall" >&2
+    echo "          expected a [Dirs] entry with the uninsneveruninstall flag" >&2
+    status=1
+fi
+
+# And nothing may delete it on the way out. A [UninstallDelete] entry covering
+# the folder would undo the flag above without contradicting it in a way
+# anybody would notice while reading.
+if grep -E '^Type: *(files|filesandordirs|dirifempty)' "$SETUP" | grep -q 'data'; then
+    echo "    FAIL: $SETUP deletes something under the data folder on uninstall" >&2
+    status=1
+fi
+
+[ "$status" -eq 0 ] && echo "    ok"
+
 exit "$status"

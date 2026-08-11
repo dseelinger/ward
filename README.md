@@ -5,8 +5,15 @@ in the cockpit, in the headset, without tabbing out of the game.
 
 ## Ward does not run yet
 
-There is nothing installable here. The repository is at its beginning and is being built in
+No release has been published yet. The repository is at its beginning and is being built in
 the open, so the issue tracker is currently more informative than the code.
+
+When there is one, it will be a per-user installer on the
+[releases page](https://github.com/dseelinger/ward/releases): no administrator, no elevation
+prompt, and everything Ward writes kept in one folder beside the program that an upgrade
+leaves alone. Ward ships unsigned, so Windows will show a SmartScreen dialog the first time.
+Each release publishes a `SHA256SUMS.txt`; checking the installer against it is the way to
+know you have the file the release meant to publish.
 
 If you arrived looking for something to use, the first release to try will be **0.1.0**, and
 the first release worth recommending will be **1.0.0**. Both are milestones on the tracker.

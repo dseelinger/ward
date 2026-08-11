@@ -46,6 +46,15 @@ use speech::{Act, Arbiter, Body, Register, Speaker};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 fn main() -> eframe::Result<()> {
+    // Answered before anything is loaded, because the thing asking is usually
+    // the release gate checking that the binary it just built is the one it
+    // meant to build. A version that needs a window open to read is a version
+    // nothing can assert on.
+    if std::env::args().any(|argument| argument == "--version") {
+        println!("Ward {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let data_dir = config::data_dir();
 
     // Logging failing is not a reason for Ward not to run. Say so on the

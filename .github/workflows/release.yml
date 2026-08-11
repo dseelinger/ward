@@ -1,0 +1,165 @@
+name: release
+
+# Heavy checks run here rather than on every pull request. A pull request
+# cannot ship a broken install, so the check belongs on the path that ships —
+# and keeping the push loop quick matters more for a project with one
+# maintainer than running the same test a hundred times a week.
+on:
+  release:
+    types: [published]
+  # So the whole path can be exercised without publishing anything.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: What version is this
+        id: version
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building Ward $version"
+
+      # Static C runtime, so the binary is one file that needs nothing
+      # installed alongside it.
+      #
+      # Set here rather than in a config file that every build would pick up,
+      # because the debug profile does not link this way — the C++ compiled for
+      # the speech model and Rust's own code end up disagreeing about which C
+      # runtime they are using. What ships is what has to be self-contained, so
+      # this is on the path that ships and the step below proves it worked.
+      #
+      # Both halves are required and they have to agree. Rust goes static
+      # through the target feature; the C++ compiled during the build goes
+      # static through CMake's runtime setting.
+      - name: Build, linking the C runtime in
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+          CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
+        run: cargo build --release
+
+      # The binary is asked what it is rather than trusted to be what the build
+      # thought it was. This is the whole point of the flag existing.
+      - name: The binary reports the version it was built as
+        shell: bash
+        run: |
+          reported=$(./target/release/ward.exe --version)
+          expected="Ward ${{ steps.version.outputs.version }}"
+          echo "reported: $reported"
+          [ "$reported" = "$expected" ] || { echo "expected: $expected"; exit 1; }
+
+      # The claim NOTICE.md makes, checked rather than asserted. A binary that
+      # imports the Visual C++ runtime does not run on a machine that has never
+      # had a C++ application installed, and that is exactly the machine this
+      # whole job is about.
+      - name: Nothing has to be installed alongside it
+        shell: pwsh
+        run: |
+          $found = & "${env:SystemRoot}\System32\findstr.exe" /I /M /C:"VCRUNTIME140" target\release\ward.exe
+          if ($LASTEXITCODE -eq 0) {
+            Write-Error "ward.exe needs the Visual C++ redistributable"
+            exit 1
+          }
+          Write-Host "No Visual C++ runtime dependency."
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" installer\ward.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem dist
+
+      # Published with the release and verified before anything downloaded is
+      # executed. Ward ships unsigned, and this is what stands in for a
+      # certificate on the one risk that matters — a file that is not the file
+      # the release meant to publish.
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem dist\ward-setup-*.exe | Select-Object -First 1
+          $hash = (Get-FileHash $setup.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($setup.Name)" | Out-File -FilePath dist\SHA256SUMS.txt -Encoding ascii
+          Get-Content dist\SHA256SUMS.txt
+
+      # The closes-when, run on a machine that has genuinely never seen Ward.
+      #
+      # The pre-check is not ceremony. If a Ward were somehow already running,
+      # a single-instance guard could make a launch that did nothing look like
+      # a launch that worked, and this test would pass while proving the
+      # opposite of what it claims.
+      - name: Install it, run it, and see whether it survives
+        shell: pwsh
+        run: |
+          if (Get-Process ward -ErrorAction SilentlyContinue) {
+            Write-Error "Ward was already running before the install. This test cannot mean anything."
+            exit 1
+          }
+
+          $setup = Get-ChildItem dist\ward-setup-*.exe | Select-Object -First 1
+          $installed = "$env:LOCALAPPDATA\Programs\Ward\ward.exe"
+
+          if (Test-Path $installed) {
+            Write-Error "Ward is already installed on this runner. This test cannot mean anything."
+            exit 1
+          }
+
+          Start-Process -FilePath $setup.FullName `
+            -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
+
+          if (-not (Test-Path $installed)) {
+            Write-Error "The installer ran and put no executable down."
+            exit 1
+          }
+
+          # No elevation was asked for, so it must have landed in the per-user
+          # location rather than under Program Files.
+          Write-Host "Installed to $installed"
+
+          $reported = & $installed --version
+          Write-Host "installed binary reports: $reported"
+          if ($reported -ne "Ward ${{ steps.version.outputs.version }}") {
+            Write-Error "The installed binary is not the one that was built."
+            exit 1
+          }
+
+          $ward = Start-Process -FilePath $installed -PassThru
+          Start-Sleep -Seconds 20
+
+          if ($ward.HasExited) {
+            Write-Error "Ward started and then stopped. Exit code $($ward.ExitCode)."
+            Get-Content "$env:LOCALAPPDATA\Programs\Ward\data\logs\*.log" -ErrorAction SilentlyContinue
+            exit 1
+          }
+
+          Write-Host "Still running after 20 seconds."
+          Stop-Process -Id $ward.Id -Force
+
+      - name: Attach the installer to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/ward-setup-*.exe dist/SHA256SUMS.txt --clobber
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ward-setup
+          path: |
+            dist/ward-setup-*.exe
+            dist/SHA256SUMS.txt

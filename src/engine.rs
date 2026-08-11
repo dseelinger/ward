@@ -1168,14 +1168,25 @@ mod tests {
         engine_asking(answering(events))
     }
 
-    fn engine_asking(
-        ask: Ask,
-    ) -> (
-        Handle,
-        Said,
-        UnboundedSender<listen::Voiced>,
-        Arc<AtomicUsize>,
-    ) {
+    /// An engine that was never given a microphone, rather than one whose
+    /// microphone fails. That is what a Commander without one actually has, and
+    /// the two are different code paths.
+    fn engine_with_no_ears(ask: Ask) -> (Handle, Said) {
+        let (speak, said) = listening_voice();
+        let mut engine = bare_engine();
+
+        engine.ask = Some(ask);
+        engine.speak = speak;
+
+        (launch(engine, None), said)
+    }
+
+    /// An engine wired to nothing, for a test to fill in.
+    fn bare_engine() -> Engine {
+        bare_engine_counting(Arc::new(AtomicUsize::new(0)))
+    }
+
+    fn bare_engine_counting(woken: Arc<AtomicUsize>) -> Engine {
         let mut settings = Settings::default();
 
         // Pointed at nothing on purpose. The journal tick still runs - that is
@@ -1190,13 +1201,7 @@ mod tests {
             ),
         );
 
-        let woken = Arc::new(AtomicUsize::new(0));
-        let counter = woken.clone();
-
-        let (speak, said) = listening_voice();
-        let (mic, heard) = unbounded_channel();
-
-        let mut engine = Engine::new(
+        Engine::new(
             settings,
             Arc::new(Registry::new(Vec::new())),
             None,
@@ -1205,10 +1210,26 @@ mod tests {
                 hush: listen::Hush::default(),
                 captions: Arc::new(Mutex::new(Captions::default())),
                 wake: Arc::new(move || {
-                    counter.fetch_add(1, Ordering::Relaxed);
+                    woken.fetch_add(1, Ordering::Relaxed);
                 }),
             },
-        );
+        )
+    }
+
+    fn engine_asking(
+        ask: Ask,
+    ) -> (
+        Handle,
+        Said,
+        UnboundedSender<listen::Voiced>,
+        Arc<AtomicUsize>,
+    ) {
+        let woken = Arc::new(AtomicUsize::new(0));
+
+        let (speak, said) = listening_voice();
+        let (mic, heard) = unbounded_channel();
+
+        let mut engine = bare_engine_counting(woken.clone());
 
         engine.ask = Some(ask);
         engine.speak = speak;
@@ -1321,6 +1342,35 @@ mod tests {
         assert_eq!(
             ward.view().history[1].text,
             "Forty tons remaining. That is enough for three more jumps."
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ward_answers_with_no_microphone_at_all() {
+        // The path a Commander falls back to when the microphone is wrong, the
+        // speech model is missing, or they are somewhere they cannot talk -
+        // which means it is used exactly when something else is already broken,
+        // and it is the surface most likely to be broken by a change aimed at
+        // voice.
+        //
+        // Not a microphone that fails. One that was never started, which is
+        // what a Commander without one actually has.
+        let (ward, said) = engine_with_no_ears(answering(vec![
+            Event::Text("Sixteen tons.".into()),
+            Event::Done { stop_reason: None },
+        ]));
+
+        ward.tell(Intent::Ask("how much cargo".into()));
+
+        assert!(
+            until(|| ward.view().history.len() == 2).await,
+            "a typed question went unanswered"
+        );
+
+        assert_eq!(ward.view().history[1].text, "Sixteen tons.");
+        assert!(
+            until(|| said.lock().unwrap().len() == 1).await,
+            "the answer was never spoken"
         );
     }
 

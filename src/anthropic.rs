@@ -310,20 +310,7 @@ impl Client {
             "requesting"
         );
 
-        let body = Request {
-            model: &self.model,
-            max_tokens: MAX_TOKENS,
-            stream: true,
-            system: SYSTEM,
-            // Effort is the latency lever. Thinking itself stays on: with it
-            // disabled the model can write a tool call into its visible text
-            // instead of making the call, and the turn then succeeds while
-            // nothing runs and nothing errors. For something that speaks its
-            // answers aloud, that is claiming an action it never took.
-            output_config: OutputConfig { effort: "low" },
-            tools,
-            messages: wire,
-        };
+        let body = compose(&self.model, wire, tools, EFFORT);
 
         let response = self
             .http
@@ -608,6 +595,42 @@ struct OutputConfig<'a> {
     effort: &'a str,
 }
 
+/// How hard the model thinks before answering.
+///
+/// The latency lever. Thinking itself stays on: with it disabled the model can
+/// write a tool call into its visible text instead of making the call, and the
+/// turn then succeeds while nothing runs and nothing errors. For something that
+/// speaks its answers aloud, that is claiming an action it never took.
+const EFFORT: &str = "low";
+
+/// Builds the request that goes on the wire.
+///
+/// Pulled out of the call so a test can assert on what actually leaves rather
+/// than on the constants it is supposed to be made from. Those are two
+/// different claims, and only one of them is worth anything: the guardrails
+/// being present in `SYSTEM` says nothing about whether `SYSTEM` is what the
+/// request carries.
+fn compose<'a>(
+    model: &'a str,
+    wire: &'a [WireMessage],
+    tools: Vec<Value>,
+    effort: &'a str,
+) -> Request<'a> {
+    Request {
+        model,
+        max_tokens: MAX_TOKENS,
+        stream: true,
+        // Not a parameter, and deliberately. Every caller gets the same
+        // guardrails, and there is no argument anybody can pass to leave them
+        // out - which is the shape that makes a budget setting unable to strip
+        // them however hard it tries.
+        system: SYSTEM,
+        output_config: OutputConfig { effort },
+        tools,
+        messages: wire,
+    }
+}
+
 #[derive(Serialize)]
 struct WireMessage {
     role: &'static str,
@@ -805,10 +828,87 @@ mod tests {
 
     #[test]
     fn the_guardrails_are_in_the_system_prompt() {
-        // Static, cached prompt material. If a later change moves them
-        // somewhere a budget or effort setting can strip, this fails.
+        // The weaker of the two claims, and worth keeping: it catches somebody
+        // editing the words out. It says nothing about whether this constant is
+        // what a request carries, which is what the test below is for.
         assert!(SYSTEM.contains("unless it was given to you"));
         assert!(SYSTEM.contains("Never say you have done something"));
+    }
+
+    /// Every way a request can currently be built, walked by one test.
+    ///
+    /// A list rather than one example, because the failure to guard against is
+    /// not the guardrails being deleted - it is a request assembled some other
+    /// way that quietly does not carry them. Anything that adds a new dimension
+    /// to how a request is made belongs here, and a dimension left out of this
+    /// list is the gap.
+    fn every_shape() -> Vec<(&'static str, Vec<Value>, &'static str)> {
+        let full = crate::capabilities::registry(
+            &crate::config::Settings::default(),
+            std::path::Path::new("."),
+        )
+        .tools();
+
+        let mut shapes = Vec::new();
+
+        // No tools at all is the shape a budget mechanism produces at its most
+        // aggressive, and it is exactly the case that went wrong before:
+        // dropping the tools took the anti-invention rules with them, and what
+        // followed was fabricated stock, a fabricated pledge and a fabricated
+        // discount, all spoken as fact.
+        for tools in [Vec::new(), full] {
+            for effort in ["low", "medium", "high", "max"] {
+                shapes.push(("claude-opus-5", tools.clone(), effort));
+            }
+        }
+
+        shapes
+    }
+
+    #[test]
+    fn the_guardrails_reach_the_wire_whatever_else_changes() {
+        let history = [WireMessage {
+            role: "user",
+            content: vec![Block::Text {
+                text: "what is my jump range".to_string(),
+            }],
+        }];
+
+        let shapes = every_shape();
+        assert!(!shapes.is_empty(), "nothing was checked");
+
+        for (model, tools, effort) in shapes {
+            let sent = serde_json::to_value(compose(model, &history, tools.clone(), effort))
+                .expect("the request would not serialize");
+
+            let system = sent["system"].as_str().unwrap_or_default();
+
+            assert!(
+                system.contains("unless it was given to you in this conversation"),
+                "a request with {} tools at effort {effort} went out without the \
+                 rule against stating things it was not told",
+                tools.len()
+            );
+
+            assert!(
+                system.contains("Never say you have done something"),
+                "a request with {} tools at effort {effort} went out without the \
+                 rule against claiming an action it did not take",
+                tools.len()
+            );
+        }
+    }
+
+    #[test]
+    fn the_guardrails_cannot_be_left_out_by_a_caller() {
+        // There is no argument for them. A budget, a persona or a second
+        // provider can change the model, the tools and how hard it thinks, and
+        // none of those is a way to compose a request without the rules - which
+        // is a stronger guarantee than any test, and this asserts the shape
+        // that provides it.
+        let sent = serde_json::to_value(compose("m", &[], Vec::new(), "low")).unwrap();
+
+        assert_eq!(sent["system"], SYSTEM);
     }
 
     #[test]

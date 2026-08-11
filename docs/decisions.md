@@ -77,8 +77,10 @@ Typing a question and reading the answer stays possible. Accessibility is
 tracked debt rather than an assumption, because the toolkit's support for it is
 well behind what a browser offers.
 
-> open — the typed path works and nothing holds it open deliberately.
-> [#121](https://github.com/dseelinger/ward/issues/121)
+> accepted — a test holds the typed path open: Ward completes a turn with no
+> microphone at all, which is what a Commander without one has rather than one
+> that fails. Screen reader support is deliberately out of scope, decided by
+> the maintainer, and recorded here so it is not reopened by accident.
 
 ## D8 — Input is a gate, output is one stream of speech acts
 
@@ -269,14 +271,14 @@ falls back on what the model happens to remember. The rules that hold this are
 static prompt material and must never be strippable by a budget or a speed
 setting.
 
-> open — half held. The rules are in the static system prompt and one test
-> asserts the words are still in it, which catches somebody editing them out.
-> Nothing asserts they reach the request, so a change to how the prompt is
-> assembled would pass that test while shipping turns with no guardrails at
-> all — and nothing stops a future budget setting stripping them, which is
-> exactly how this failed before: fabricated station stock, a fabricated pledge
-> and a fabricated discount, all spoken as fact.
-> [#128](https://github.com/dseelinger/ward/issues/128)
+> enforced — `cargo test`, the guardrail tests in `src/anthropic.rs`. They
+> assert on the serialized request rather than on the constant it is supposed
+> to be made from, across every tool list and every effort, because the failure
+> to guard against is not the rules being deleted but a request assembled some
+> other way that quietly does not carry them. There is also no argument for
+> leaving them out: a budget, a persona or a second provider can change the
+> model, the tools and how hard it thinks, and none of those is a way to
+> compose a request without the rules.
 
 ## D28 — The naming allowlist covers integrations only
 

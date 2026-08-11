@@ -66,11 +66,19 @@ jobs:
       - name: Nothing has to be installed alongside it
         shell: pwsh
         run: |
-          $found = & "${env:SystemRoot}\System32\findstr.exe" /I /M /C:"VCRUNTIME140" target\release\ward.exe
-          if ($LASTEXITCODE -eq 0) {
-            Write-Error "ward.exe needs the Visual C++ redistributable"
-            exit 1
+          # Read in process rather than shelling out. An external search sets
+          # the last exit code to "no match", the step wrapper reads that as the
+          # step's own result, and a check that passed reports failure.
+          $bytes = [System.IO.File]::ReadAllBytes("target\release\ward.exe")
+          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+
+          foreach ($dll in @("VCRUNTIME140", "MSVCP140")) {
+            if ($text.Contains($dll)) {
+              Write-Error "ward.exe imports $dll, so it needs the Visual C++ redistributable"
+              exit 1
+            }
           }
+
           Write-Host "No Visual C++ runtime dependency."
 
       - name: Build the installer

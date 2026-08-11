@@ -1,0 +1,23 @@
+{
+  "default_bindings": [
+    { "controller_type": "knuckles", "binding_url": "ward_bindings_knuckles.json" },
+    { "controller_type": "oculus_touch", "binding_url": "ward_bindings_oculus_touch.json" },
+    { "controller_type": "vive_controller", "binding_url": "ward_bindings_vive_controller.json" },
+    { "controller_type": "holographic_controller", "binding_url": "ward_bindings_holographic_controller.json" }
+  ],
+  "actions": [
+    { "name": "/actions/panel/in/grab", "type": "boolean", "requirement": "suggested" },
+    { "name": "/actions/panel/in/hand", "type": "pose", "requirement": "suggested" }
+  ],
+  "action_sets": [
+    { "name": "/actions/panel", "usage": "leftright" }
+  ],
+  "localization": [
+    {
+      "language_tag": "en_US",
+      "/actions/panel": "Ward panel",
+      "/actions/panel/in/grab": "Take hold of the panel",
+      "/actions/panel/in/hand": "Where your hand is"
+    }
+  ]
+}

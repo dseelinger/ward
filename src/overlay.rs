@@ -315,6 +315,9 @@ struct Panel {
     /// Whether SteamVR's keyboard is up, so it is asked for once rather than every frame a text
     /// box has focus.
     typing: bool,
+    /// What the last resize asked for, held until the texture behind it has actually been handed
+    /// over, so the answer is read when there is something to read.
+    asked_for: Option<String>,
     /// Whether anything typed has ever arrived, said once and never with what.
     typed_anything: bool,
     /// Whether any controller has ever been seen, said once. A grab that does nothing is otherwise
@@ -385,6 +388,19 @@ impl Panel {
             self.visible = true;
         }
 
+        // Now that the compositor has the image, what it made of it. The pointer's reach comes out
+        // of the texture size and the width together, so a mode change that left either behind is
+        // a panel the ray can only touch part of.
+        if let Some(asked) = self.asked_for.take() {
+            tracing::info!(
+                target: "ward::vr",
+                mode = ?self.mode,
+                %asked,
+                got = %layer.extent(),
+                "panel resized"
+            );
+        }
+
         Ok(())
     }
 
@@ -420,16 +436,11 @@ impl Panel {
             layer.set_width(width)?;
             self.applied_mode = Some(self.mode);
 
-            // What SteamVR ended up with, rather than what it was asked for. The pointer's reach
-            // comes out of the texture size and the width together, so a mode change that left
-            // either behind is a panel the ray can only touch part of.
-            tracing::info!(
-                target: "ward::vr",
-                mode = ?self.mode,
-                asked = %format!("{}x{} at {width:.2}m", pixels.0, pixels.1),
-                got = %layer.extent(),
-                "panel resized"
-            );
+            // Asked here and answered after the next texture is submitted. Reading it now says
+            // 0x0 every time, because `forget_texture` has just run and the new image does not
+            // exist yet - which is a measurement taken at the one moment there is nothing to
+            // measure, and it told us nothing four times before this comment existed.
+            self.asked_for = Some(format!("{}x{} at {width:.2}m", pixels.0, pixels.1));
         }
 
         if let Some(placed) = self.placed

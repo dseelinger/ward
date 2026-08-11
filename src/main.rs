@@ -199,6 +199,14 @@ fn as_the_window_system_counts_it(points: egui::Vec2, zoom: f32) -> egui::Vec2 {
     points * zoom
 }
 
+/// How long the voice service gets to answer before Ward gives up on a piece.
+///
+/// Generous, because synthesis of a long piece legitimately takes seconds, and
+/// finite because the alternative turned out to be forever: an unanswered
+/// connection held the speech stream open and every later reply arrived on
+/// screen in silence.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Checks the things that fail quietly.
 ///
 /// Every one of these stands for an evening somebody could otherwise lose. A
@@ -678,7 +686,31 @@ impl Ward {
                             break;
                         }
 
-                        match voice::synthesize(&piece, &voice, &rate).await {
+                        // Bounded, because it was not. A websocket that
+                        // connects and then says nothing left this task waiting
+                        // forever, and the stream above waits for this task to
+                        // report - so one stalled connection silenced Ward for
+                        // the rest of the session while the answers kept
+                        // arriving on screen.
+                        let attempt = tokio::time::timeout(
+                            PATIENCE,
+                            voice::synthesize(&piece, &voice, &rate),
+                        )
+                        .await;
+
+                        let spoke = match attempt {
+                            Ok(spoke) => spoke,
+                            Err(_) => {
+                                tracing::warn!(
+                                    target: "ward::voice",
+                                    seconds = PATIENCE.as_secs(),
+                                    "the voice service stopped answering"
+                                );
+                                break;
+                            }
+                        };
+
+                        match spoke {
                             // The receiver is gone, which means playback stopped
                             // and nothing is waiting for this.
                             Ok(speech) => {

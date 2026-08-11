@@ -237,6 +237,16 @@ pub(crate) fn draw_caption(ui: &mut egui::Ui, caption: &crate::captions::Caption
                     // as tall as the words and no taller.
                     ui.spacing_mut().item_spacing.y = 0.0;
 
+                    // Never wrap. The lines arrive already broken to the
+                    // caption standard, so there is nothing left to decide -
+                    // and letting the toolkit decide it again is a loop that
+                    // eats itself: an area is as wide as its contents, a
+                    // narrower area wraps the text, wrapped text is more lines,
+                    // more lines is a narrower and taller box, and the caption
+                    // reflows in front of the Commander until it is four lines
+                    // of ribbon down the middle of the cockpit.
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+
                     for (at, line) in caption.lines.iter().enumerate() {
                         // The speaker is named once, on the first line, and
                         // never repeated down a caption that happens to wrap.

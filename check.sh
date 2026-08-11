@@ -99,6 +99,52 @@ check_list "$LOCAL" || status=1
 
 [ "$status" -eq 0 ] && echo "    ok"
 
+# --- every decision has a state ----------------------------------------------
+#
+# A decision is enforced, accepted as unenforced, or open. There is no fourth
+# state, and this is what fails on one.
+#
+# The failure it prevents is not somebody arguing for an unenforced rule. It is
+# a decision quietly ceasing to be true with nothing noticing - which is what
+# happened to every decision that did not fall out as a capability, because the
+# decisions lived outside the repository and nothing in here knew they existed.
+#
+# This check reads the record, not another check. It validates that decisions
+# have owners, which is the one thing the third rule of repository discipline
+# makes an exception for. It does not grow a companion proving it can fail.
+
+echo "==> every decision has a state"
+
+DECISIONS="docs/decisions.md"
+
+if [ ! -f "$DECISIONS" ]; then
+    echo "    FAIL: no decision record at $DECISIONS" >&2
+    status=1
+else
+    # One pass: count the state lines under each decision heading, and report
+    # any heading that does not have exactly one.
+    bad=$(awk '
+        /^## D[0-9]+ / {
+            if (heading != "" && states != 1) print heading " has " states " states"
+            heading = $2
+            states = 0
+            next
+        }
+        /^> (enforced|accepted|open) / { if (heading != "") states++ }
+        END { if (heading != "" && states != 1) print heading " has " states " states" }
+    ' "$DECISIONS")
+
+    if [ -n "$bad" ]; then
+        printf '%s\n' "$bad" | sed 's/^/    /' >&2
+        echo "    FAIL: every decision needs exactly one state line" >&2
+        echo "          '> enforced - what fails', '> accepted - why not', or" >&2
+        echo "          '> open - the issue'" >&2
+        status=1
+    else
+        echo "    ok ($(grep -c '^## D[0-9]* ' "$DECISIONS") decisions)"
+    fi
+fi
+
 # --- the installer keeps the data folder --------------------------------------
 #
 # Everything the Commander owns lives in one folder beside the executable:

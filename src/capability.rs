@@ -136,6 +136,20 @@ pub trait Capability: Send + Sync {
         format!("{} has no tool called {tool}", self.id())
     }
 
+    /// What this capability currently has to show, if anything.
+    ///
+    /// The other half of a capability being reachable without being asked. A
+    /// surface renders this rather than remembering the last answer, which is
+    /// what keeps a panel from going stale until something reloads it — and it
+    /// is how an edit made by voice appears on the panel, and an edit made on
+    /// the panel is read back correctly by voice.
+    ///
+    /// Returning nothing is ordinary. Most capabilities answer a question and
+    /// have nothing standing to show afterwards.
+    fn display(&self) -> Option<crate::shown::Shown> {
+        None
+    }
+
     /// Something happened in the game.
     ///
     /// The other half of what a capability can be. Most of what Ward will

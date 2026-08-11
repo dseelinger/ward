@@ -18,13 +18,15 @@ use crate::capability::{Capability, Registry, Tool};
 /// Ordered on purpose. The tool schemas go out ahead of the conversation on
 /// every turn and are matched as a prefix of bytes, so this order is part of
 /// what makes the cache hit.
-pub fn registry(settings: &crate::config::Settings) -> Registry {
+pub fn registry(settings: &crate::config::Settings, data_dir: &std::path::Path) -> Registry {
     let honk = crate::honk::Honk::new(
         settings.flag("auto honk"),
         read_fire_binding(&settings.string("bindings folder")),
     );
 
-    Registry::new(vec![Box::new(Version), Box::new(honk)])
+    let checklist = crate::checklist::Checklist::load(&data_dir.join("checklist.json"));
+
+    Registry::new(vec![Box::new(Version), Box::new(honk), Box::new(checklist)])
 }
 
 /// Reads the Commander's fire binding once, at startup.
@@ -93,7 +95,13 @@ mod tests {
     use serde_json::json;
 
     fn test_registry() -> Registry {
-        registry(&crate::config::Settings::default())
+        // Somewhere disposable: composing the registry loads the Commander's
+        // own files, and a test must not read or write the real ones.
+        let dir = std::env::temp_dir().join("ward-registry-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        registry(&crate::config::Settings::default(), &dir)
     }
 
     #[test]

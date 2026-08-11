@@ -14,6 +14,7 @@ mod anthropic;
 mod bindings;
 mod capabilities;
 mod capability;
+mod checklist;
 mod config;
 mod diag;
 mod honk;
@@ -27,6 +28,7 @@ mod press;
 #[cfg(test)]
 mod replay;
 mod secrets;
+mod shown;
 mod speech;
 mod sse;
 mod transcribe;
@@ -80,7 +82,7 @@ fn main() -> eframe::Result<()> {
     // What is actually wired, named in the log. The question "did I remember to
     // register it" should be answerable by reading a file rather than by
     // reasoning about the composition point.
-    let registry = capabilities::registry(&settings);
+    let registry = capabilities::registry(&settings, &data_dir);
     for capability in registry.capabilities() {
         tracing::info!(
             target: "ward::capability",
@@ -185,6 +187,9 @@ struct Ward {
     heard: Option<UnboundedReceiver<listen::Voiced>>,
     /// The key is down and the Commander is talking.
     listening: bool,
+    /// A new checklist item being typed. Held here rather than in the panel so
+    /// a half-typed line survives the frame it was typed on.
+    adding: String,
     window: egui::Vec2,
 }
 
@@ -280,6 +285,7 @@ impl Ward {
             hush,
             heard,
             listening: false,
+            adding: String::new(),
             window: egui::Vec2::new(980.0, 720.0),
         }
     }
@@ -702,6 +708,92 @@ impl Ward {
         });
     }
 
+    /// Draws whatever the capabilities currently have to show.
+    ///
+    /// Read fresh every frame rather than remembered, which is what keeps this
+    /// from going stale when something changes it by voice.
+    ///
+    /// Every edit here goes through the same tool the model calls, with the
+    /// same words. The panel cannot make a change the model could not, and it
+    /// cannot make one in a way the checklist's own rules would refuse.
+    fn panel(&mut self, ui: &mut egui::Ui) {
+        // Collected first so the borrow of the registry ends before anything
+        // below runs a tool against it.
+        let displays: Vec<shown::Shown> = self
+            .registry
+            .capabilities()
+            .iter()
+            .filter_map(|c| c.display())
+            .collect();
+
+        for display in displays {
+            let title = display.title().unwrap_or_default().to_string();
+
+            let shown::Shown::List { rows, .. } = display else {
+                // Only lists have a panel today. The rest of the taxonomy grows
+                // with the capability that needs it, rather than ahead of it.
+                continue;
+            };
+
+            ui.add_space(8.0);
+            ui.heading(&title);
+            ui.add_space(4.0);
+
+            if rows.is_empty() {
+                ui.weak("Nothing on it yet.");
+            }
+
+            for row in &rows {
+                ui.horizontal(|ui| {
+                    let mut done = row.done;
+
+                    // Only ever forward. Unticking is a different question from
+                    // the one this issue answers, and guessing at it would put
+                    // a control on screen with no spoken equivalent.
+                    if ui.add_enabled(!done, egui::Checkbox::new(&mut done, "")).clicked() {
+                        let answer = self
+                            .registry
+                            .run("checklist_complete", &json!({"item": row.text}));
+                        tracing::info!(target: "ward::checklist", from = "panel", %answer, "completed");
+                    }
+
+                    if ui.small_button("✕").clicked() {
+                        let answer = self
+                            .registry
+                            .run("checklist_remove", &json!({"item": row.text}));
+                        tracing::info!(target: "ward::checklist", from = "panel", %answer, "removed");
+                    }
+
+                    let label = match row.done {
+                        true => egui::RichText::new(&row.text).weak().strikethrough(),
+                        false => egui::RichText::new(&row.text),
+                    };
+                    ui.label(label);
+                });
+            }
+
+            ui.add_space(8.0);
+
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.adding)
+                    .hint_text("Add something")
+                    .desired_width(f32::INFINITY),
+            );
+
+            let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+            if entered && !self.adding.trim().is_empty() {
+                let answer = self
+                    .registry
+                    .run("checklist_add", &json!({"item": self.adding.trim()}));
+                tracing::info!(target: "ward::checklist", from = "panel", %answer, "added");
+
+                self.adding.clear();
+                field.request_focus();
+            }
+        }
+    }
+
     fn transcript(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -831,6 +923,20 @@ impl eframe::App for Ward {
         }
 
         let need_key = matches!(self.screen, Screen::NeedKey { .. });
+
+        // Beside the conversation rather than inside it. What Ward is holding
+        // for the Commander is standing state, and standing state scrolling
+        // away with the transcript is the thing that makes a panel useless.
+        if !need_key {
+            egui::Panel::right("standing")
+                .resizable(true)
+                .default_size(280.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.panel(ui));
+                });
+        }
 
         egui::CentralPanel::default().show(ui, |ui| {
             if need_key {

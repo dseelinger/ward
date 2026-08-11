@@ -720,6 +720,7 @@ mod tests {
             DEFAULT_MODEL.to_string(),
             Arc::new(crate::capabilities::registry(
                 &crate::config::Settings::default(),
+                &std::env::temp_dir().join("ward-anthropic-test"),
             )),
         );
         let printed = format!("{client:?}");
@@ -747,7 +748,11 @@ mod tests {
             stream: true,
             system: "s",
             output_config: OutputConfig { effort: "low" },
-            tools: crate::capabilities::registry(&crate::config::Settings::default()).tools(),
+            tools: crate::capabilities::registry(
+                &crate::config::Settings::default(),
+                &std::env::temp_dir().join("ward-anthropic-test"),
+            )
+            .tools(),
             messages: &[],
         })
         .unwrap();

@@ -282,15 +282,24 @@ fn read_object(path: &Path) -> Result<Option<serde_json::Map<String, Value>>> {
 /// the old file or the new one - never the half of the new one that had been
 /// flushed when the power went.
 fn write_object(path: &Path, values: &BTreeMap<String, Value>) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
-    }
-
     let map: serde_json::Map<String, Value> =
         values.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     let mut body = serde_json::to_string_pretty(&Value::Object(map))?;
     body.push('\n');
+
+    write_atomically(path, &body)
+}
+
+/// Writes a file so that a reader sees all of it or none of it.
+///
+/// Shared rather than copied, because every writable thing Ward owns wants the
+/// same guarantee and the interesting part is the sibling, which is easy to get
+/// subtly wrong twice.
+pub fn write_atomically(path: &Path, body: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
 
     let mut writing = path.as_os_str().to_owned();
     writing.push(".writing");

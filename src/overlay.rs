@@ -217,8 +217,18 @@ fn serve(
     let mut showing_caption = false;
     let mut panel = Panel::default();
 
+    // When the captions were last redrawn, so their slow pace does not set the loop's.
+    let mut drew_captions = Instant::now() - REDRAW;
+
     loop {
         let now = crate::diag::since_start();
+
+        // The summoning key is read every pass, before anything decides whether to draw. It used
+        // to be read at whatever rate the loop happened to be running, which was ten times a
+        // second while the panel was hidden - and a key tapped and released inside a hundred
+        // milliseconds fell between two polls and did nothing at all. Reading the key is a
+        // syscall; drawing is the expensive part, and only that is paced below.
+        panel.summoned(session, &engine.view());
 
         // Held only long enough to read. The window thread writes to this whenever Ward says
         // something, and it must never wait on a frame.
@@ -230,8 +240,13 @@ fn serve(
             captions.showing().cloned()
         };
 
+        // Captions change a few times a minute, so they are redrawn at their own slow pace rather
+        // than at the pace the loop now runs.
+        let caption_due = drew_captions.elapsed() >= REDRAW;
+
         match showing {
-            Some(caption) => {
+            Some(caption) if caption_due => {
+                drew_captions = Instant::now();
                 caption_art.draw(|ui| draw_caption(ui, &caption));
 
                 let Some(image) = caption_art.vulkan_image() else {
@@ -249,23 +264,22 @@ fn serve(
                     showing_caption = true;
                 }
             }
-            None => {
-                if showing_caption {
-                    caption_layer.hide()?;
-                    showing_caption = false;
-                }
+            None if showing_caption => {
+                caption_layer.hide()?;
+                showing_caption = false;
             }
+            // Either a caption that is already on screen and not due a redraw, or no caption and
+            // nothing showing. Both are nothing to do.
+            _ => {}
         }
 
         panel.frame(session, &panel_layer, &mut panel_art, engine)?;
 
-        // Idle at the caption's pace and wake up for the panel. A hidden panel is the usual state,
-        // and paying sixty frames a second for it would be paying for a picture nobody is looking
-        // at while Elite is drawing the one they are.
-        std::thread::sleep(match panel.mode.showing() {
-            true => POINTING,
-            false => REDRAW,
-        });
+        // One steady pace, because the thing this loop must not miss is a key held for a tenth of
+        // a second. Nothing is drawn on a pass where nothing needs drawing: a hidden panel does no
+        // GPU work at all, and the captions have their own clock above. What this costs is a
+        // wake-up sixty times a second, which is a syscall and a comparison.
+        std::thread::sleep(POINTING);
     }
 }
 
@@ -331,7 +345,8 @@ impl Panel {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let view = engine.view();
 
-        self.summoned(session, &view);
+        // Not summoned here. The loop does that every pass, before it decides whether anything
+        // needs drawing, because a key tapped between two draws is a key that did nothing.
         self.gestured(session, layer);
 
         if !self.mode.showing() {
@@ -345,7 +360,7 @@ impl Panel {
         }
 
         self.settle(layer, art)?;
-        self.pointed(layer, art);
+        self.pointed(session, layer, art);
 
         let mode = self.mode;
         let wants = art.draw_with(|ui| crate::surface::show(ui, &view, &mut self.local, mode));
@@ -404,6 +419,17 @@ impl Panel {
             layer.take_input(pixels.0, pixels.1)?;
             layer.set_width(width)?;
             self.applied_mode = Some(self.mode);
+
+            // What SteamVR ended up with, rather than what it was asked for. The pointer's reach
+            // comes out of the texture size and the width together, so a mode change that left
+            // either behind is a panel the ray can only touch part of.
+            tracing::info!(
+                target: "ward::vr",
+                mode = ?self.mode,
+                asked = %format!("{}x{} at {width:.2}m", pixels.0, pixels.1),
+                got = %layer.extent(),
+                "panel resized"
+            );
         }
 
         if let Some(placed) = self.placed
@@ -417,10 +443,24 @@ impl Panel {
     }
 
     /// Takes what the ray is doing and hands it to the toolkit.
-    fn pointed(&mut self, layer: &crate::vr::Overlay<'_>, art: &mut crate::render::Renderer) {
+    fn pointed(
+        &mut self,
+        session: &crate::vr::Vr,
+        layer: &crate::vr::Overlay<'_>,
+        art: &mut crate::render::Renderer,
+    ) {
+        // Two queues. Pointing arrives on the overlay's own; typing arrives on the system's, even
+        // though the keyboard was asked for on the overlay. Draining only the obvious one is why
+        // the keyboard appeared and then did nothing at all.
+        //
         // The image's own height, because that is what the Y flip is measured against and the two
         // modes are not the same size.
-        for event in layer.events(art.size().1) {
+        let arrived = layer
+            .events(art.size().1)
+            .into_iter()
+            .chain(session.typing());
+
+        for event in arrived {
             match event {
                 crate::vr::Event::Moved { x, y } => art.point_at(Some((x, y))),
                 crate::vr::Event::Button { down } => {

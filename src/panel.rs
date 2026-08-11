@@ -115,8 +115,11 @@ pub fn wanted() -> Mode {
 ///
 /// Named the way the game names keys, like every other key setting, so a Commander sets it from
 /// the same vocabulary Elite already taught them.
+///
+/// Backslash rather than a function key. The function row is where Elite already keeps a great
+/// deal, and it is also the row a Commander cannot find by touch with a headset on.
 fn summon_key() -> Value {
-    serde_json::json!("Key_F9")
+    serde_json::json!("Key_BackSlash")
 }
 
 pub static SETTINGS: &[crate::schema::Row] = &[crate::schema::Row {

@@ -52,7 +52,9 @@ Because in a headset there is always one of the three that is inconvenient.
 
 **Say so.** "Show me the panel", "put it away", or "give me the small one".
 
-**Press a key.** `Key_F9` unless you change it:
+**Press a key.** Backslash unless you change it — the function row is where Elite
+already keeps a great deal, and it is also the row you cannot find by touch with a
+headset on.
 
 ```json
 {
@@ -65,7 +67,9 @@ alone, which matters because the other two routes each need something — the
 spoken one needs Ward to be hearing you, and the grab needs a controller in
 your hand.
 
-**Use your hands.** Point at the panel and squeeze the grip to take hold of it.
+**Use your hands.** Point at the panel and squeeze the **grip** to take hold of
+it — not the trigger, which is the click. One squeeze cannot mean both, and
+pressing buttons on a panel is the more common of the two.
 It then moves with your hand, keeping the distance it had when you caught it, so
 you can put it where you want rather than where Ward guessed. Grabbing the small
 panel pulls it open into the big one. Let go with your hand still moving and you

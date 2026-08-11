@@ -199,6 +199,42 @@ impl Vr {
         self.poses().first().copied().flatten()
     }
 
+    /// Keyboard events, which do not arrive where the keyboard was asked for.
+    ///
+    /// `ShowKeyboardForOverlay` is asked of an overlay, so the obvious place to collect what was
+    /// typed is that overlay's own queue — and that is where the first attempt looked, and why
+    /// the keyboard appeared and typing did nothing. SteamVR puts keyboard events on the system
+    /// queue instead. Both are drained now, because which one they arrive on is a detail of the
+    /// runtime rather than a promise, and a key pressed twice is worse than a queue read twice.
+    #[must_use]
+    pub fn typing(&self) -> Vec<Event> {
+        let mut out = Vec::new();
+
+        let Some(poll) = self.system.PollNextEvent else {
+            return out;
+        };
+
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the event struct is far smaller than a u32 can count"
+        )]
+        let size = std::mem::size_of::<sys::VREvent_t>() as u32;
+
+        let mut event = sys::VREvent_t::default();
+
+        while unsafe { poll(&raw mut event, size) } {
+            // SAFETY: the union is read according to the event type that named it, which is the
+            // only thing that says which arm is live.
+            out.extend(match event.eventType {
+                TYPED => unsafe { typed_text(&event.data.keyboard) }.map(Event::Typed),
+                DONE | CLOSED => Some(Event::DoneTyping),
+                _ => None,
+            });
+        }
+
+        out
+    }
+
     /// Every controller SteamVR currently knows about.
     ///
     /// Returned as a list rather than as a left and a right, because which hand a controller is
@@ -622,17 +658,6 @@ impl Overlay<'_> {
 
         // OpenVR declares the event kinds as signed and reports them as unsigned in the same
         // struct. Narrowed here, once, rather than at each of the five comparisons below.
-        const MOVED: u32 = sys::EVREventType_VREvent_MouseMove.cast_unsigned();
-        const DOWN: u32 = sys::EVREventType_VREvent_MouseButtonDown.cast_unsigned();
-        const UP: u32 = sys::EVREventType_VREvent_MouseButtonUp.cast_unsigned();
-        const DISCRETE: u32 = sys::EVREventType_VREvent_ScrollDiscrete.cast_unsigned();
-        const SMOOTH: u32 = sys::EVREventType_VREvent_ScrollSmooth.cast_unsigned();
-        const LEFT: u32 = sys::EVREventType_VREvent_FocusLeave.cast_unsigned();
-        const TYPED: u32 = sys::EVREventType_VREvent_KeyboardCharInput.cast_unsigned();
-        const DONE: u32 = sys::EVREventType_VREvent_KeyboardDone.cast_unsigned();
-        const CLOSED: u32 = sys::EVREventType_VREvent_KeyboardClosed.cast_unsigned();
-        const TRIGGER: u32 = sys::EVRMouseButton_VRMouseButton_Left.cast_unsigned();
-
         let mut event = sys::VREvent_t::default();
 
         while unsafe { poll(self.handle, &raw mut event, size) } {
@@ -717,6 +742,29 @@ impl Overlay<'_> {
                 true,
             )
         })
+    }
+
+    /// What SteamVR thinks this overlay is: its texture in pixels, and its width in metres.
+    ///
+    /// Read back rather than assumed, because the interactive area of an overlay is derived from
+    /// both together and a stale one is invisible from inside the program. The specific suspicion
+    /// this answers: a big panel whose pointer only reaches a mini panel's worth of it, which is
+    /// exactly what a mouse scale left at the smaller size would look like.
+    #[must_use]
+    pub fn extent(&self) -> String {
+        let mut width = 0u32;
+        let mut height = 0u32;
+        let mut metres = 0f32;
+
+        if let Some(size) = self.table.GetOverlayTextureSize {
+            unsafe { size(self.handle, &raw mut width, &raw mut height) };
+        }
+
+        if let Some(across) = self.table.GetOverlayWidthInMeters {
+            unsafe { across(self.handle, &raw mut metres) };
+        }
+
+        format!("{width}x{height} at {metres:.2}m")
     }
 
     /// Lets go of the image the compositor is holding.
@@ -886,6 +934,42 @@ unsafe fn interface<T>(version: &[u8]) -> Option<&'static T> {
         return None;
     }
     Some(unsafe { &*(pointer as *const T) })
+}
+
+// OpenVR declares the event kinds as signed and reports them as unsigned in the same struct.
+// Narrowed here, once, rather than at every comparison against them.
+const MOVED: u32 = sys::EVREventType_VREvent_MouseMove.cast_unsigned();
+const DOWN: u32 = sys::EVREventType_VREvent_MouseButtonDown.cast_unsigned();
+const UP: u32 = sys::EVREventType_VREvent_MouseButtonUp.cast_unsigned();
+const DISCRETE: u32 = sys::EVREventType_VREvent_ScrollDiscrete.cast_unsigned();
+const SMOOTH: u32 = sys::EVREventType_VREvent_ScrollSmooth.cast_unsigned();
+const LEFT: u32 = sys::EVREventType_VREvent_FocusLeave.cast_unsigned();
+const TYPED: u32 = sys::EVREventType_VREvent_KeyboardCharInput.cast_unsigned();
+const DONE: u32 = sys::EVREventType_VREvent_KeyboardDone.cast_unsigned();
+const CLOSED: u32 = sys::EVREventType_VREvent_KeyboardClosed.cast_unsigned();
+const TRIGGER: u32 = sys::EVRMouseButton_VRMouseButton_Left.cast_unsigned();
+
+/// What was typed, out of the fixed buffer OpenVR reports it in.
+///
+/// Eight bytes, not required to be terminated when full, so the length comes from the first zero
+/// rather than being trusted from the array.
+///
+/// # Safety
+///
+/// The event this came from must have been a keyboard one, so that this arm of the union is the
+/// live one.
+unsafe fn typed_text(keyboard: &sys::VREvent_Keyboard_t) -> Option<String> {
+    let bytes: Vec<u8> = keyboard
+        .cNewInput
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| byte.cast_unsigned())
+        .collect();
+
+    match bytes.is_empty() {
+        true => None,
+        false => String::from_utf8(bytes).ok(),
+    }
 }
 
 /// The headset itself, which is always device zero.

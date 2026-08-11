@@ -14,10 +14,15 @@ members = ["crates/openvr-sys"]
 
 [dependencies]
 anyhow = "1.0.104"
+ash = "0.38.0"
 cpal = "0.17.3"
 eframe = "0.36.1"
+egui = "0.36.1"
+egui-wgpu = "0.36.1"
 futures-util = "0.3.33"
+glam = "0.33.3"
 openvr-sys = { version = "0.1.0", path = "crates/openvr-sys" }
+pollster = "1.0.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "http2", "default-tls"] }
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "minimp3"] }
 roxmltree = "0.21.1"
@@ -31,4 +36,5 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "json", "env-filter", "registry", "time"] }
 whisper-rs = { version = "0.16.0", default-features = false, features = ["tracing_backend"] }
+wgpu = "30.0.0"
 windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }

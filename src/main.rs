@@ -14,6 +14,7 @@ mod anthropic;
 mod bindings;
 mod capabilities;
 mod capability;
+mod captions;
 mod checklist;
 mod config;
 mod diag;
@@ -21,8 +22,10 @@ mod honk;
 mod journal;
 mod listen;
 mod mic;
+mod overlay;
 mod page;
 mod press;
+mod render;
 // Test infrastructure rather than application code: its whole purpose is to
 // stand in for the game. It compiles only for tests, so it cannot quietly
 // become something the running application depends on.
@@ -35,6 +38,7 @@ mod speech;
 mod sse;
 mod transcribe;
 mod voice;
+mod vr;
 
 use anthropic::{Client, Event, Message, Role};
 use std::sync::Arc;
@@ -323,6 +327,9 @@ struct Ward {
     spoken: Option<UnboundedReceiver<()>>,
     /// Speech in progress, so holding the key can cut it off mid-word.
     playing: voice::Playing,
+    /// What is on screen in the headset. Shared with the thread that draws it,
+    /// which runs on SteamVR's clock rather than the window's.
+    captions: std::sync::Arc<std::sync::Mutex<captions::Captions>>,
     /// Tells the microphone to ignore Ward's own voice coming back through the
     /// room. The gate half of barge-in; the handle above is the duck half.
     hush: listen::Hush,
@@ -422,6 +429,11 @@ impl Ward {
 
         let (errand_tx, errand_rx) = unbounded_channel();
 
+        // Started whether or not there is a headset. It keeps asking, because
+        // SteamVR is usually not running yet when Ward is.
+        let captions = std::sync::Arc::new(std::sync::Mutex::new(captions::Captions::default()));
+        overlay::spawn(captions.clone());
+
         Self {
             settings,
             registry,
@@ -442,6 +454,7 @@ impl Ward {
             spoke_at: std::time::Duration::ZERO,
             spoken: None,
             playing: voice::Playing::default(),
+            captions,
             hush,
             heard,
             listening: false,
@@ -574,6 +587,13 @@ impl Ward {
     /// spoke, but a companion that stops working because it could not speak is
     /// worse than both.
     fn say(&mut self, act: &Act, ctx: &egui::Context) {
+        // Into the headset before it is into the speaker. The caption is not a
+        // transcript of what was said; it is the same act, shown rather than
+        // spoken, and it appears when the act does.
+        if let Ok(mut captions) = self.captions.lock() {
+            captions.started(act);
+        }
+
         let Body::Text(text) = &act.body else {
             return;
         };
@@ -1231,6 +1251,16 @@ impl eframe::App for Ward {
         // Speaking finished, so the stream may move on.
         if self.spoken.as_mut().is_some_and(|rx| rx.try_recv().is_ok()) {
             self.spoken = None;
+
+            // The caption holds from here, not from when Ward started talking.
+            // Timed from the start, a long reply clears itself off the headset
+            // while the voice is still saying it.
+            if let Some(act) = self.speech.speaking()
+                && let Ok(mut captions) = self.captions.lock()
+            {
+                captions.finished(now, act.dwell());
+            }
+
             self.speech.finished();
         }
 

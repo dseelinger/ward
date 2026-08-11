@@ -21,7 +21,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      # Its own cache, separate from the one every push uses. This job builds
+      # against a different C runtime, so it shares no compiled artifact with
+      # that one - and pointing both at the same cache means each run throws
+      # away what the other put there and rebuilds three hundred crates and the
+      # speech model's C++ from nothing.
+      #
+      # Saved even when the job fails, because the runs worth caching hardest
+      # are the ones being iterated on.
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: static-crt
+          cache-on-failure: true
 
       - name: What version is this
         id: version

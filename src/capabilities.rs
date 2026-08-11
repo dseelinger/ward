@@ -95,9 +95,17 @@ mod tests {
     use serde_json::json;
 
     fn test_registry() -> Registry {
-        // Somewhere disposable: composing the registry loads the Commander's
-        // own files, and a test must not read or write the real ones.
-        let dir = std::env::temp_dir().join("ward-registry-test");
+        // Somewhere disposable, and somewhere *nobody else is standing*.
+        //
+        // These tests run at the same time as each other. Sharing one folder
+        // name meant one test deleting it while another was creating it, and
+        // whichever lost the race failed - so the build went red on an
+        // assertion about documentation because of a directory. A flake is
+        // worse than no test: it teaches you to rerun rather than to read.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let mine = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let dir = std::env::temp_dir().join(format!("ward-registry-test-{mine}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

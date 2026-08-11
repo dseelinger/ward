@@ -38,3 +38,18 @@ tracing-subscriber = { version = "0.3.23", features = ["fmt", "json", "env-filte
 whisper-rs = { version = "0.16.0", default-features = false, features = ["tracing_backend"] }
 wgpu = "30.0.0"
 windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+# Named for what it does inside whisper-rs, not for what it sounds like. That
+# crate builds its C++ one way for a debug build and another for a release one,
+# and on this workload the debug configuration is eleven times faster: a two
+# second clip took 2.4 seconds to transcribe one way and 25.5 the other, on the
+# same machine with the same model, with a fan audible across the room.
+#
+# The output is identical - the end-to-end test transcribes a spoken sentence
+# word for word either way - so this is speed with nothing traded for it.
+#
+# What in that branch does it is still not established. It changes the CMake
+# configuration and defines WHISPER_DEBUG, and setting the configuration alone
+# through the environment did not help, so it is not simply which optimizer
+# flags are used. The flag is on because it was measured, not because the
+# mechanism is understood.
+whisper-rs-sys = { version = "0.15.0", features = ["force-debug"] }

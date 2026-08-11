@@ -4672,6 +4672,7 @@ dependencies = [
  "tracing-subscriber",
  "wgpu",
  "whisper-rs",
+ "whisper-rs-sys",
  "windows-sys 0.61.2",
 ]
 

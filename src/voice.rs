@@ -416,6 +416,11 @@ pub fn play(audio: Vec<u8>, playing: &Playing) -> Result<()> {
     // Ward would talk over the Commander for the length of a reply.
     playing.holds(Some(player.clone()));
 
+    // Sound is leaving the speaker from here. Everything before it is a wait
+    // the Commander is sitting through, so this is the end of the interval
+    // worth measuring rather than the moment synthesis returned.
+    tracing::info!(target: "ward::voice", "sound out");
+
     player.sleep_until_end();
 
     playing.holds(None);
@@ -785,6 +790,31 @@ mod tests {
             into_pieces("Forty two light years."),
             vec!["Forty two light years."]
         );
+    }
+
+    /// Times the things between synthesis finishing and sound coming out.
+    ///
+    /// Permanently ignored: it opens the real audio device on this machine.
+    /// Run deliberately when the wait before Ward speaks does not match what
+    /// the logs say it should be.
+    #[test]
+    #[ignore = "opens the real audio device"]
+    fn how_long_does_it_take_to_start_making_a_noise() {
+        for attempt in 1..=3 {
+            let began = std::time::Instant::now();
+            let device = rodio::DeviceSinkBuilder::open_default_sink();
+            let opened = began.elapsed();
+
+            let device = device.expect("no audio output device");
+            let mixed = began.elapsed();
+            let _ = device.mixer();
+
+            println!(
+                "attempt {attempt}: opening the device {} ms, ready to play at {} ms",
+                opened.as_millis(),
+                mixed.as_millis()
+            );
+        }
     }
 
     #[test]

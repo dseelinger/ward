@@ -290,6 +290,58 @@ mod tests {
         assert_eq!(plain(&heard), plain(said), "heard: {heard:?}");
     }
 
+    /// How long the model takes on a fixed amount of audio, with nothing else
+    /// in the measurement.
+    ///
+    /// No synthesis and no network, because both were in the way of the last
+    /// attempt to answer this. Whisper pads short audio out to a fixed window,
+    /// so the number here barely depends on how much speech is in it — which
+    /// makes it a clean comparison between one build and another.
+    ///
+    /// Run it in both profiles when transcription feels slow:
+    ///
+    /// ```text
+    /// cargo test          how_long_does_the_model_take -- --ignored --nocapture
+    /// cargo test --release how_long_does_the_model_take -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs the speech model"]
+    fn how_long_does_the_model_take() {
+        let mut model = Whisper::load(&model_on_this_machine()).expect("the model would not load");
+
+        // Two seconds of a quiet tone. What it says does not matter; the work
+        // the model does is set by the length of the window, not the words.
+        let audio: Vec<f32> = (0..crate::mic::RATE as usize * 2)
+            .map(|n| (n as f32 * 0.02).sin() * 0.2)
+            .collect();
+
+        let mut slowest = std::time::Duration::ZERO;
+
+        for attempt in 1..=3 {
+            let began = std::time::Instant::now();
+            let _ = model.read(&audio);
+            let took = began.elapsed();
+            slowest = slowest.max(took);
+
+            println!(
+                "attempt {attempt}: {} ms for 2 seconds of audio on {} threads",
+                took.as_millis(),
+                threads()
+            );
+        }
+
+        // A ceiling rather than a target. The honest figure on the machine this
+        // was written on is around two and a half seconds; the build that had
+        // the wrong configuration took twenty five, and nothing in the test
+        // suite noticed because nothing in the test suite runs the model.
+        // Anything near this bound means the build has gone wrong again.
+        assert!(
+            slowest < std::time::Duration::from_secs(10),
+            "the model took {} ms on two seconds of audio, which means the C++              was built with the wrong configuration",
+            slowest.as_millis()
+        );
+    }
+
     #[test]
     fn a_missing_model_says_where_it_looked() {
         let Err(e) = Whisper::load(Path::new("nowhere/ggml-small.en.bin")) else {

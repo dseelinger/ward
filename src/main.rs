@@ -360,6 +360,8 @@ struct Ward {
     heard: Option<UnboundedReceiver<listen::Voiced>>,
     /// The key is down and the Commander is talking.
     listening: bool,
+    /// Whether this turn has put anything on screen yet.
+    showed_something: bool,
     /// Where the window is, in the units the window system uses.
     placement: Option<egui::Pos2>,
     /// A new checklist item being typed. Held here rather than in the panel so
@@ -482,6 +484,7 @@ impl Ward {
             hush,
             heard,
             listening: false,
+            showed_something: false,
             adding: String::new(),
             placement: None,
             page: page::Page::default(),
@@ -514,6 +517,7 @@ impl Ward {
             text,
         });
         self.pending = Some(String::new());
+        self.showed_something = false;
 
         let (tx, rx): (UnboundedSender<Event>, UnboundedReceiver<Event>) = unbounded_channel();
         self.events = Some(rx);
@@ -948,6 +952,15 @@ impl Ward {
         let mut finished = false;
 
         while let Ok(event) = rx.try_recv() {
+            // The moment anything appears, which is where the Commander starts
+            // counting. The reply streams in, so this is the first token rather
+            // than the last one - measuring from the end of the reply told a
+            // flattering story about a wait that begins here.
+            if matches!(event, Event::Text(_) | Event::Using(_)) && !self.showed_something {
+                self.showed_something = true;
+                tracing::info!(target: "ward::turn", "first text on screen");
+            }
+
             match event {
                 Event::Text(chunk) => {
                     self.using = None;

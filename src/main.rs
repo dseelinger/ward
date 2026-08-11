@@ -657,57 +657,84 @@ impl Ward {
 
             let mut first_audio: Option<u64> = None;
 
-            for (at, piece) in pieces.iter().enumerate() {
+            // One piece is fetched while the one before it is playing, which
+            // is what makes the seams silent. Written as a loop that fetched
+            // and then played, the wait for the next piece fell into the gap
+            // between two sentences and was plainly audible - a pause the
+            // length of a network round trip in the middle of a reply.
+            //
+            // A channel of one is the whole mechanism: the fetcher runs a piece
+            // ahead and then waits, so at most one extra piece is ever bought
+            // and paid for before an interruption throws it away.
+            let (ready, mut waiting) = tokio::sync::mpsc::channel::<(String, voice::Speech)>(1);
+
+            {
+                let playing = playing.clone();
+                let pieces = pieces.clone();
+
+                tokio::spawn(async move {
+                    for piece in pieces {
+                        if playing.cut_off() {
+                            break;
+                        }
+
+                        match voice::synthesize(&piece, &voice, &rate).await {
+                            // The receiver is gone, which means playback stopped
+                            // and nothing is waiting for this.
+                            Ok(speech) => {
+                                if ready.send((piece, speech)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(target: "ward::voice", error = %e, "could not speak");
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+
+            let mut spoken = 0usize;
+
+            while let Some((piece, speech)) = waiting.recv().await {
                 if playing.cut_off() {
-                    tracing::info!(target: "ward::voice", spoken = at, of = pieces.len(), "cut off");
+                    tracing::info!(target: "ward::voice", spoken, of = pieces.len(), "cut off");
                     break;
                 }
 
-                match voice::synthesize(piece, &voice, &rate).await {
-                    Ok(speech) => {
-                        // The captions for this piece, told how long the voice
-                        // will take over it. Handed over here rather than from
-                        // the window, because the window is not painted while
-                        // Ward is minimized - which in a headset is most of the
-                        // time, and a caption clock that stops there is one that
-                        // leaves a caption on screen forever.
-                        if let Ok(mut captions) = captions.lock() {
-                            captions.speaking(
-                                piece,
-                                speaker,
-                                speech.duration(),
-                                diag::since_start(),
-                            );
-                        }
+                // The captions for this piece, told how long the voice will take
+                // over it. Handed over here rather than from the window, because
+                // the window is not painted while Ward is minimized - which in a
+                // headset is most of the time, and a caption clock that stops
+                // there is one that leaves a caption on screen forever.
+                if let Ok(mut captions) = captions.lock() {
+                    captions.speaking(&piece, speaker, speech.duration(), diag::since_start());
+                }
 
-                        if first_audio.is_none() {
-                            let ms = started.elapsed().as_millis() as u64;
-                            first_audio = Some(ms);
-                            tracing::info!(
-                                target: "ward::voice",
-                                ms,
-                                pieces = pieces.len(),
-                                chars = piece.chars().count(),
-                                "first audio ready"
-                            );
-                        }
+                if first_audio.is_none() {
+                    let ms = started.elapsed().as_millis() as u64;
+                    first_audio = Some(ms);
+                    tracing::info!(
+                        target: "ward::voice",
+                        ms,
+                        pieces = pieces.len(),
+                        chars = piece.chars().count(),
+                        "first audio ready"
+                    );
+                }
 
-                        // Playback blocks for as long as the words take, so it
-                        // goes somewhere that is allowed to block.
-                        let playing = playing.clone();
-                        let played =
-                            tokio::task::spawn_blocking(move || voice::play(speech.audio, &playing))
-                                .await;
+                // Playback blocks for as long as the words take, so it goes
+                // somewhere that is allowed to block.
+                let playing = playing.clone();
+                let played =
+                    tokio::task::spawn_blocking(move || voice::play(speech.audio, &playing)).await;
 
-                        if let Ok(Err(e)) = played {
-                            tracing::warn!(target: "ward::voice", error = %e, "could not play");
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(target: "ward::voice", error = %e, "could not speak");
-                        break;
-                    }
+                spoken += 1;
+
+                if let Ok(Err(e)) = played {
+                    tracing::warn!(target: "ward::voice", error = %e, "could not play");
+                    break;
                 }
             }
 

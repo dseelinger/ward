@@ -33,7 +33,7 @@ use crate::capability::Registry;
 use crate::captions::Captions;
 use crate::config::Settings;
 use crate::speech::{Act, Arbiter, Body, Register, Speaker};
-use crate::{capabilities, config, diag, journal, listen, shown, voice};
+use crate::{capabilities, config, diag, journal, listen, shown, update, voice};
 
 /// How long the voice service gets to answer before Ward gives up on a piece.
 ///
@@ -102,6 +102,43 @@ pub enum Intent {
     Preview(String),
     /// Run one of a capability's tools, as the panel does when a box is ticked.
     Tool(&'static str, String),
+    /// Yes, fetch that update. Asked once per version, and never assumed: a
+    /// program that fetches and runs a new binary on its own has decided
+    /// something the Commander did not.
+    Update,
+}
+
+/// Something Ward found out on its own, rather than being asked.
+enum News {
+    /// What the release listing said.
+    Update(update::Answer),
+    /// An installer, downloaded and proved to be the file the release
+    /// published, or why not.
+    Fetched(Result<std::path::PathBuf, String>),
+}
+
+/// Where Ward has got to with a new version.
+#[derive(Default, Clone, PartialEq, Eq)]
+pub enum Update {
+    /// Nothing known yet, or nothing to say. Deliberately the same as up to
+    /// date **for the window only** - there is nothing to show either way, and
+    /// the difference is kept where it matters, in the log and in the answer
+    /// the check returned.
+    #[default]
+    Nothing,
+    /// There is a newer Ward, and the Commander has not been asked yet.
+    Newer(String),
+    /// They said yes and it is coming down.
+    Fetching(String),
+    /// Downloaded and verified. Installed when Ward closes, so no installer
+    /// window appears over the game.
+    Ready {
+        version: String,
+        installer: std::path::PathBuf,
+    },
+    /// It did not work, and this is why. Never silently swallowed: a Commander
+    /// who said yes and got nothing needs to know which of the two happened.
+    Failed(String),
 }
 
 /// What the window draws.
@@ -123,6 +160,8 @@ pub struct View {
     pub streaming: bool,
     /// What the capabilities currently have to show, as of the last change.
     pub panels: Vec<shown::Shown>,
+    /// Where a newer Ward has got to.
+    pub update: Update,
 }
 
 /// The window's end of the engine.
@@ -210,6 +249,12 @@ pub struct Engine {
     watcher: Option<journal::Watcher>,
     situation: journal::Situation,
 
+    /// Where a newer Ward has got to, and the release it came from.
+    update: Update,
+    newer: Option<update::Release>,
+    news: UnboundedSender<News>,
+    heard_news: Option<UnboundedReceiver<News>>,
+
     gear: Gear,
     view: Arc<Mutex<Arc<View>>>,
 }
@@ -250,6 +295,8 @@ impl Engine {
             wake: gear.wake.clone(),
         });
 
+        let (news, heard_news) = unbounded_channel();
+
         let mut engine = Self {
             settings,
             registry,
@@ -273,6 +320,10 @@ impl Engine {
             speech: Arbiter::default(),
             watcher: None,
             situation: journal::Situation::default(),
+            update: Update::Nothing,
+            newer: None,
+            news,
+            heard_news: Some(heard_news),
             gear,
             view: Arc::new(Mutex::new(Arc::new(View::default()))),
         };
@@ -311,6 +362,21 @@ impl Engine {
 
         tracing::info!(target: "ward::engine", "running");
 
+        // Asked once, at the start, and never again during the session. A
+        // Commander does not need telling twice, and a program that keeps
+        // asking a service it does not pay for is a bad guest.
+        {
+            let news = self.news.clone();
+            let current = env!("CARGO_PKG_VERSION").to_string();
+            let enabled = self.settings.flag("check for updates");
+
+            tokio::spawn(async move {
+                let _ = news.send(News::Update(update::look(&current, enabled).await));
+            });
+        }
+
+        let mut heard_news = self.heard_news.take();
+
         self.publish();
 
         loop {
@@ -338,6 +404,10 @@ impl Engine {
                     self.spoken = None;
                     self.speech.finished();
                     true
+                },
+                news = next(&mut heard_news) => match news {
+                    Some(news) => self.news(news),
+                    None => { heard_news = None; false }
                 },
                 _ = journal.tick() => self.read_journal(),
                 _ = upkeep.tick() => false,
@@ -431,6 +501,54 @@ impl Engine {
         true
     }
 
+    /// Something Ward found out without being asked.
+    fn news(&mut self, news: News) -> bool {
+        match news {
+            News::Update(update::Answer::UpToDate) => {
+                tracing::info!(target: "ward::update", "up to date");
+            }
+            // Written down as what it is. An unanswered question is not a
+            // negative answer, and the window is told nothing rather than told
+            // everything is fine - which is the version of this that once hid
+            // four installable releases behind a confident green.
+            News::Update(update::Answer::Unknown(why)) => {
+                tracing::warn!(target: "ward::update", reason = %why, "could not check");
+            }
+            News::Update(update::Answer::Newer(release)) => {
+                tracing::info!(
+                    target: "ward::update",
+                    version = %release.version,
+                    "a newer Ward is available"
+                );
+
+                self.update = Update::Newer(release.version.clone());
+                self.newer = Some(release);
+            }
+            News::Fetched(Ok(installer)) => {
+                tracing::info!(
+                    target: "ward::update",
+                    installer = %installer.display(),
+                    "downloaded and verified"
+                );
+
+                self.update = Update::Ready {
+                    version: self
+                        .newer
+                        .as_ref()
+                        .map(|r| r.version.clone())
+                        .unwrap_or_default(),
+                    installer,
+                };
+            }
+            News::Fetched(Err(why)) => {
+                tracing::warn!(target: "ward::update", reason = %why, "could not fetch");
+                self.update = Update::Failed(why);
+            }
+        }
+
+        true
+    }
+
     /// Something the window asked for.
     fn intent(&mut self, intent: Intent) -> bool {
         match intent {
@@ -505,6 +623,24 @@ impl Engine {
                 });
 
                 return false;
+            }
+            Intent::Update => {
+                let Some(release) = self.newer.clone() else {
+                    return false;
+                };
+
+                self.update = Update::Fetching(release.version.clone());
+
+                let news = self.news.clone();
+                let into = config::data_dir();
+
+                tokio::spawn(async move {
+                    let got = update::fetch(&release, &into)
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+
+                    let _ = news.send(News::Fetched(got));
+                });
             }
             Intent::Tool(tool, item) => {
                 let answer = self
@@ -812,6 +948,7 @@ impl Engine {
                 .iter()
                 .filter_map(|c| c.display())
                 .collect(),
+            update: self.update.clone(),
         });
 
         match self.view.lock() {
@@ -1201,6 +1338,12 @@ mod tests {
             ),
         );
 
+        // Off, because a test has no business asking a service whether there is
+        // a newer Ward. This was not off to begin with, and the way that showed
+        // was the network guard firing on a detached task while every test still
+        // passed - a guard nobody hears is the same as no guard.
+        settings.set("check for updates", serde_json::json!(false));
+
         Engine::new(
             settings,
             Arc::new(Registry::new(Vec::new())),
@@ -1446,6 +1589,75 @@ mod tests {
             "a question that failed should not be left in the history to be sent twice"
         );
         assert_eq!(view.problem.as_deref(), Some("the model service said 529"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_newer_ward_is_offered_and_never_taken_without_being_asked() {
+        let engine = bare_engine();
+        let news = engine.news.clone();
+        let ward = launch(engine, None);
+
+        let release = update::Release {
+            version: "9.9.9".to_string(),
+            installer:
+                "https://github.com/dseelinger/ward/releases/download/v9.9.9/ward-setup-9.9.9.exe"
+                    .to_string(),
+            checksums: "https://github.com/dseelinger/ward/releases/download/v9.9.9/SHA256SUMS.txt"
+                .to_string(),
+        };
+
+        news.send(News::Update(update::Answer::Newer(release)))
+            .unwrap();
+
+        assert!(
+            until(|| ward.view().update == Update::Newer("9.9.9".to_string())).await,
+            "a newer Ward was never offered"
+        );
+
+        // And nothing has been fetched. Ward asks; it does not decide. The test
+        // would fail on the network guard if it had gone and got it.
+        assert!(!matches!(
+            ward.view().update,
+            Update::Fetching(_) | Update::Ready { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_update_that_could_not_be_fetched_says_so() {
+        // A Commander who said yes and then heard nothing cannot tell the
+        // difference between still going and quietly failed.
+        let engine = bare_engine();
+        let news = engine.news.clone();
+        let ward = launch(engine, None);
+
+        news.send(News::Fetched(Err("the checksum did not match".into())))
+            .unwrap();
+
+        assert!(
+            until(
+                || matches!(&ward.view().update, Update::Failed(why) if why.contains("checksum"))
+            )
+            .await,
+            "the failure went unsaid"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn being_unable_to_check_is_not_reported_as_being_up_to_date() {
+        // The whole reason there are three answers. Collapsing an unanswered
+        // question into a negative one once showed a confident green while four
+        // installable releases went unoffered.
+        let engine = bare_engine();
+        let news = engine.news.clone();
+        let ward = launch(engine, None);
+
+        news.send(News::Update(update::Answer::Unknown("no network".into())))
+            .unwrap();
+
+        assert!(
+            until(|| ward.view().update == Update::Nothing).await,
+            "not being able to check should leave nothing claimed either way"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

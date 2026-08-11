@@ -443,8 +443,11 @@ switching it off means no call is made. An unreadable setting reads as enabled,
 because a safety net is never disabled by surprise. Availability waits for the
 installer to be attached rather than for the release to exist.
 
-> open — no update code exists at all.
-> [#126](https://github.com/dseelinger/ward/issues/126)
+> enforced — `cargo test`, the tests in `src/update.rs`. The gate is checked
+> before the request, so off means nothing is sent and the network guard would
+> fail the test if it were. A listing Ward cannot read is an unanswered
+> question rather than a negative answer, and a release whose installer is not
+> attached yet is not offered.
 
 ## D43 — Ship unsigned, and verify by checksum
 
@@ -453,7 +456,11 @@ risk from an install somebody chose, so the checksum is published with the
 release and verified before anything executes, and the download host is fenced
 to an allowlist.
 
-> open — [#126](https://github.com/dseelinger/ward/issues/126)
+> enforced — `cargo test`, the tests in `src/update.rs`. The fence refuses
+> plain HTTP, a host that merely contains an allowed one, and a URL whose real
+> host hides after a userinfo section. The checksum is matched against the name
+> the release published it under, and a mismatch refuses rather than warns.
+> Nothing is executed by the code that downloads it.
 
 ## D44 — What an update does
 
@@ -463,7 +470,13 @@ answer once hid four installable releases behind a confident green. Installs on
 the way out, so an installer window never appears over the game. Askable and
 actionable by voice.
 
-> open — [#126](https://github.com/dseelinger/ward/issues/126)
+> open — two of the four. The three-way answer is built and tested, and it
+> installs on the way out rather than over the game. It is visible in the
+> window and not yet in the headset, which waits on the panel that will carry
+> it; and it cannot be asked for by voice, which wants the update state
+> reachable from a capability and is the piece that is genuinely unbuilt rather
+> than merely blocked.
+> [#126](https://github.com/dseelinger/ward/issues/126)
 
 ## D45 — Three rules of repository discipline, and no more
 

@@ -311,11 +311,6 @@ impl Ward {
             )
         };
 
-        // The thread the keyboard hook lives on. Started here rather than beside the panel,
-        // because it has to exist before anything can ask it to take a key and it must never
-        // share a thread with something that draws.
-        keys::steal::start();
-
         // Started whether or not there is a headset, and after the engine
         // because the panel draws from it. It keeps asking, because SteamVR is
         // usually not running yet when Ward is.

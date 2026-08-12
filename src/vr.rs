@@ -123,10 +123,6 @@ pub enum Event {
     Scrolled { x: f32, y: f32 },
     /// The ray left the overlay entirely, so there is nothing being pointed at.
     Left,
-    /// Something was typed on SteamVR's keyboard. One or more characters, as they arrive.
-    Typed(String),
-    /// The keyboard was closed, whether by finishing or by giving up.
-    DoneTyping,
 }
 
 /// One controller, as the panel needs to see it.
@@ -230,42 +226,6 @@ impl Vr {
     #[must_use]
     pub fn head(&self) -> Option<Affine3A> {
         self.poses().first().copied().flatten()
-    }
-
-    /// Keyboard events, which do not arrive where the keyboard was asked for.
-    ///
-    /// `ShowKeyboardForOverlay` is asked of an overlay, so the obvious place to collect what was
-    /// typed is that overlay's own queue — and that is where the first attempt looked, and why
-    /// the keyboard appeared and typing did nothing. SteamVR puts keyboard events on the system
-    /// queue instead. Both are drained now, because which one they arrive on is a detail of the
-    /// runtime rather than a promise, and a key pressed twice is worse than a queue read twice.
-    #[must_use]
-    pub fn typing(&self) -> Vec<Event> {
-        let mut out = Vec::new();
-
-        let Some(poll) = self.system.PollNextEvent else {
-            return out;
-        };
-
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the event struct is far smaller than a u32 can count"
-        )]
-        let size = std::mem::size_of::<sys::VREvent_t>() as u32;
-
-        let mut event = sys::VREvent_t::default();
-
-        while unsafe { poll(&raw mut event, size) } {
-            // SAFETY: the union is read according to the event type that named it, which is the
-            // only thing that says which arm is live.
-            out.extend(match event.eventType {
-                TYPED => unsafe { typed_text(&event.data.keyboard) }.map(Event::Typed),
-                DONE | CLOSED => Some(Event::DoneTyping),
-                _ => None,
-            });
-        }
-
-        out
     }
 
     /// Every controller SteamVR currently knows about.
@@ -801,20 +761,6 @@ impl Overlay<'_> {
                         y: scroll.ydelta,
                     })
                 }
-                TYPED => {
-                    let typed = unsafe { event.data.keyboard.cNewInput };
-
-                    // A fixed eight byte buffer that is not required to be terminated when full, so
-                    // the length is taken from the first zero rather than trusted from the array.
-                    let bytes: Vec<u8> = typed
-                        .iter()
-                        .take_while(|byte| **byte != 0)
-                        .map(|byte| byte.cast_unsigned())
-                        .collect();
-
-                    String::from_utf8(bytes).ok().map(Event::Typed)
-                }
-                DONE | CLOSED => Some(Event::DoneTyping),
                 LEFT => Some(Event::Left),
                 _ => None,
             };
@@ -940,56 +886,6 @@ impl Overlay<'_> {
         })
     }
 
-    /// Puts SteamVR's own keyboard in front of the Commander.
-    ///
-    /// Ward does not draw one. A headset already has a keyboard the Commander knows, with their
-    /// own layout and their own way of typing on it, and a second one drawn into this overlay
-    /// would be a worse copy that also has to be pointed at with the same ray it is competing
-    /// with.
-    ///
-    /// What comes back arrives through [`Self::events`] as [`Event::Typed`], one character at a
-    /// time, which is what the toolkit wants anyway.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the call is refused. A keyboard already up is not an error worth propagating —
-    /// it means the Commander is already typing.
-    pub fn show_keyboard(&self, description: &str, existing: &str) -> Result<(), Error> {
-        let show = self
-            .table
-            .ShowKeyboardForOverlay
-            .ok_or(Error::MissingInterface("ShowKeyboardForOverlay"))?;
-
-        let description = CString::new(description).unwrap_or_default();
-        let existing = CString::new(existing).unwrap_or_default();
-
-        let code = unsafe {
-            show(
-                self.handle,
-                sys::EGamepadTextInputMode_k_EGamepadTextInputModeNormal,
-                sys::EGamepadTextInputLineMode_k_EGamepadTextInputLineModeSingleLine,
-                0,
-                description.as_ptr().cast_mut(),
-                MOST_TYPED,
-                existing.as_ptr().cast_mut(),
-                0,
-            )
-        };
-
-        if code == sys::EVROverlayError_VROverlayError_KeyboardAlreadyInUse {
-            return Ok(());
-        }
-
-        check("ShowKeyboardForOverlay", code)
-    }
-
-    /// Takes the keyboard away.
-    pub fn hide_keyboard(&self) {
-        if let Some(hide) = self.table.HideKeyboard {
-            unsafe { hide() };
-        }
-    }
-
     /// Puts the overlay on screen.
     ///
     /// # Errors
@@ -1079,45 +975,13 @@ const UP: u32 = sys::EVREventType_VREvent_MouseButtonUp.cast_unsigned();
 const DISCRETE: u32 = sys::EVREventType_VREvent_ScrollDiscrete.cast_unsigned();
 const SMOOTH: u32 = sys::EVREventType_VREvent_ScrollSmooth.cast_unsigned();
 const LEFT: u32 = sys::EVREventType_VREvent_FocusLeave.cast_unsigned();
-const TYPED: u32 = sys::EVREventType_VREvent_KeyboardCharInput.cast_unsigned();
-const DONE: u32 = sys::EVREventType_VREvent_KeyboardDone.cast_unsigned();
-const CLOSED: u32 = sys::EVREventType_VREvent_KeyboardClosed.cast_unsigned();
 const TRIGGER: u32 = sys::EVRMouseButton_VRMouseButton_Left.cast_unsigned();
-
-/// What was typed, out of the fixed buffer OpenVR reports it in.
-///
-/// Eight bytes, not required to be terminated when full, so the length comes from the first zero
-/// rather than being trusted from the array.
-///
-/// # Safety
-///
-/// The event this came from must have been a keyboard one, so that this arm of the union is the
-/// live one.
-unsafe fn typed_text(keyboard: &sys::VREvent_Keyboard_t) -> Option<String> {
-    let bytes: Vec<u8> = keyboard
-        .cNewInput
-        .iter()
-        .take_while(|byte| **byte != 0)
-        .map(|byte| byte.cast_unsigned())
-        .collect();
-
-    match bytes.is_empty() {
-        true => None,
-        false => String::from_utf8(bytes).ok(),
-    }
-}
 
 /// The headset itself, which is always device zero.
 const HMD: u32 = sys::k_unTrackedDeviceIndex_Hmd;
 
 /// How many devices OpenVR can track at once, which is the size of every pose array it fills.
 const DEVICES: u32 = sys::k_unMaxTrackedDeviceCount;
-
-/// The most characters SteamVR's keyboard will collect before it stops taking any.
-///
-/// Generous, because the longest thing anybody types into Ward is a folder path or an API key,
-/// and a keyboard that silently stops accepting input is worse than one that never opened.
-const MOST_TYPED: u32 = 1024;
 
 /// Where the panel sits among everything else SteamVR is drawing.
 ///

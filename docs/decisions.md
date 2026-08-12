@@ -52,20 +52,26 @@ depended on one depended on another product's private and undocumented surface.
 No second interface, and no browser embedded to draw one. The window cannot be
 more capable than the headset, because there is one implementation of both.
 
-> accepted — nothing checks that a second surface is not added. It would be a
-> large and obvious change rather than a drift, and a check that fires on
-> nothing is one people learn to ignore.
+> open — one implementation holds, and equal capability does not. There is one widget tree and
+> both surfaces draw it, so no second interface exists and none can appear by drift. But the
+> headset has no way to type: reading the keyboard also typed into the game, taking it from the
+> game could leave a Commander locked out of their own keys, and SteamVR's own keyboard was not
+> worth having. So the settings page is drawn in the headset with text boxes nobody can fill,
+> which is the window being more capable than the headset — the exact thing this decision denies.
+> Either that is fixed or this decision is rewritten to say the headset does not carry settings.
+> [#133](https://github.com/dseelinger/ward/issues/133)
 
 ## D5 — Three layers in the headset
 
 Captions on their own layer, output only and ephemeral. A small panel that can
 be glanced at. A full panel at parity with the window.
 
-> accepted — all three ship. Captions are their own overlay, output only and following the
-> head; the panel is a second overlay placed in the room, and mini and big are two modes of it
-> rather than two surfaces. Nothing enforces the count, and a fourth layer would be a new
-> overlay key and a new thread rather than a drift — the same argument D4 makes, for the same
-> reason.
+> open — all three ship and the third is not what this says it is. Captions are their own
+> overlay, output only and following the head; the panel is a second overlay placed in the room,
+> and mini and big are two modes of it rather than two surfaces. What is not true is "at parity
+> with the window": the big panel cannot be typed into, so the settings page is on it and cannot
+> be completed there. The layer count is not what is open here — the claim about the third layer
+> is. [#133](https://github.com/dseelinger/ward/issues/133)
 
 ## D6 — The panel is summoned two ways, and positioned by hand
 

@@ -116,34 +116,26 @@ at a metre and a half turns an ordinary steady hand into more drift than a
 desktop toolkit will accept in a click, and about half of them were being thrown
 away as accidental drags before that was fixed.
 
-## Typing
+## Typing, and where it is not
 
-**Your own keyboard works.** Point at a text box on the panel and type, and the
-letters go in — no clicking through to the desktop first. Ward reads the keyboard
-directly, because a headset overlay is never given the keyboard focus that would
-normally deliver keystrokes to it.
+**The panel cannot be typed into.** Point at a text box and it takes focus, and no
+letters go in — there is no keyboard in the headset.
 
-**The game does not see what you type at the panel.** While a text box has focus,
-Ward takes those keys, so typing "route to Colonia" does not also fire whatever
-r, o, u and t are bound to in the cockpit. The moment the box loses focus the
-keyboard goes straight back to whatever wants it.
+Three ways were built and none survived. Reading your keyboard directly worked and
+typed into the game at the same time, so a folder path also went to the cockpit
+where those letters do things. Taking the keyboard away from the game worked too,
+and was removed: too many ways to be left unable to type to anything at all, and
+the consequence of being wrong lands mid-flight. SteamVR draws its own keyboard,
+and it was not worth having.
 
-Three things are never taken, so a focused text box can never trap you:
+So settings are a thing you do at the desk, in Ward's own window, before you fly.
+Everything on the panel that is not typing — the conversation, the checklist,
+picking a voice from the list, every checkbox and every Reset — works from the
+headset.
 
-- your push-to-talk key
-- the key that summons the panel
-- anything held with Ctrl or Alt, which is a shortcut rather than a letter
-
-Your layout is whatever Windows says it is, so a key types the letter printed on
-it. Backspace deletes.
-
-SteamVR's own keyboard also comes up when a box takes focus, for pointing at when
-there is no real keyboard within reach.
-
-The conversation is deliberately not selectable text. Dragging a selection across
-a log that is growing underneath you is a poor experience with a mouse and a
-worse one with a ray, so it is drawn as read-only lines with nothing to catch a
-stray drag on.
+This is tracked as [#133](https://github.com/dseelinger/ward/issues/133), and it
+is genuinely undecided whether the answer is to make typing work or to stop
+drawing the settings page in the headset at all.
 
 ## When there is no headset
 

@@ -159,10 +159,6 @@ fn run(captions: &Arc<Mutex<Captions>>, engine: &Handle) {
             tracing::warn!(target: "ward::vr", error = %e, "the headset layers stopped");
         }
 
-        // Whatever went wrong up there, the keyboard is not Ward's any more. Nothing below this
-        // draws a panel, so nothing below this has any business holding the Commander's keys.
-        crate::keys::steal::taking(false);
-
         // Dropping the session shuts OpenVR down, which is what makes going round again a fresh
         // start rather than a second init on a runtime that already has one.
         drop(session);
@@ -324,15 +320,6 @@ struct Panel {
     summon_down: bool,
     /// When the mode last changed on its own, so one gesture cannot fire twice.
     settled: Option<Instant>,
-    /// Whether SteamVR's keyboard is up, so it is asked for once rather than every frame a text
-    /// box has focus.
-    typing: bool,
-    /// Whether the Commander closed the drawn keyboard while a box still had focus.
-    ///
-    /// Held until focus moves, because otherwise the frame after they dismiss it sees the same
-    /// focused box and asks for it straight back - so it could not be dismissed at all. There is a
-    /// real keyboard now, so closing the drawn one is an ordinary thing to want.
-    keyboard_dismissed: bool,
     /// What the last resize asked for, held until the texture behind it has actually been handed
     /// over, so the answer is read when there is something to read.
     asked_for: Option<String>,
@@ -400,16 +387,11 @@ impl Panel {
                 self.applied_place = None;
             }
 
-            // Before returning, and unconditionally. A panel dismissed while a text box had focus
-            // left the keyboard taken with nothing running that would ever give it back - every
-            // key on the machine swallowed until Ward was closed. What would have released it is
-            // below this return, which is the whole of the bug.
-            self.let_go(layer);
             return Ok(());
         }
 
         self.settle(layer, art, view.settings.f32("panel curve", 0.0, 0.5))?;
-        self.pointed(session, layer, art);
+        self.pointed(layer, art);
 
         let mode = self.mode;
         let drawn = art.draw_with(|ui| crate::surface::show(ui, &view, &mut self.local, mode));
@@ -433,18 +415,7 @@ impl Panel {
         // The real keyboard first. It is read whether or not SteamVR's own is up, because a
         // Commander at a desk with a headset on still has hands and a keyboard in front of them,
         // and that is a shorter route to a folder path than picking the letters off a panel.
-        // Taken from the game only while something is actually being typed into, and given back
-        // the instant it is not. The two keys that work Ward itself are never taken, or a text box
-        // with focus would be a box the Commander cannot talk or press their way out of.
-        let wants = art.wants_typing();
-
-        crate::keys::steal::spare([
-            crate::listen::PushToTalk::key_for(&view.settings.string("push to talk key")),
-            crate::listen::PushToTalk::key_for(&view.settings.string("panel key")),
-        ]);
-        crate::keys::steal::taking(wants);
-
-        let typed = self.keyboard.typed(wants);
+        let typed = self.keyboard.typed(art.wants_typing());
 
         if !typed.is_empty() && !self.typed_anything {
             tracing::info!(target: "ward::vr", "typing is reaching the panel");
@@ -461,8 +432,6 @@ impl Panel {
         if let Some(text) = art.copied() {
             crate::keys::clipboard::write(&text);
         }
-
-        self.keyboard(layer, art);
 
         let Some(image) = art.vulkan_image() else {
             return Err("the renderer produced no image OpenVR could read".into());
@@ -558,24 +527,10 @@ impl Panel {
     }
 
     /// Takes what the ray is doing and hands it to the toolkit.
-    fn pointed(
-        &mut self,
-        session: &crate::vr::Vr,
-        layer: &crate::vr::Overlay<'_>,
-        art: &mut crate::render::Renderer,
-    ) {
-        // Two queues. Pointing arrives on the overlay's own; typing arrives on the system's, even
-        // though the keyboard was asked for on the overlay. Draining only the obvious one is why
-        // the keyboard appeared and then did nothing at all.
-        //
+    fn pointed(&mut self, layer: &crate::vr::Overlay<'_>, art: &mut crate::render::Renderer) {
         // The image's own height, because that is what the Y flip is measured against and the two
         // modes are not the same size.
-        let arrived = layer
-            .events(art.size().1)
-            .into_iter()
-            .chain(session.typing());
-
-        for event in arrived {
+        for event in layer.events(art.size().1) {
             match event {
                 crate::vr::Event::Moved { x, y } => {
                     self.pointer = Some((x, y));
@@ -601,24 +556,6 @@ impl Panel {
                     }
                 }
                 crate::vr::Event::Scrolled { x, y } => art.scroll(x, y),
-                crate::vr::Event::Typed(text) => {
-                    // Said once per keyboard, and never with what was typed. The API key goes
-                    // through this exact path, so the only safe thing to record is that the round
-                    // trip closed at all - which is the whole question anyway.
-                    if !self.typed_anything {
-                        tracing::info!(target: "ward::vr", "typing is reaching the panel");
-                        self.typed_anything = true;
-                    }
-
-                    art.typed(&text);
-                }
-                crate::vr::Event::DoneTyping => {
-                    // Closed, and not to be reopened until focus actually moves. Without this the
-                    // next frame sees a text box still focused, asks for the keyboard again, and
-                    // the Commander cannot dismiss it at all while a box has focus.
-                    self.typing = false;
-                    self.keyboard_dismissed = true;
-                }
                 crate::vr::Event::Left => {
                     art.point_at(None);
                     // The button is not released here. egui keeps it down on purpose when the
@@ -774,50 +711,6 @@ impl Panel {
     /// clicked. A box that took focus because Ward asked it to — the compose field re-focusing
     /// itself after a question — opens the keyboard the same way one the Commander pointed at
     /// does.
-    /// Gives the keyboard back and puts the drawn one away, whatever else was happening.
-    ///
-    /// Called on every path that stops drawing the panel. Taking the Commander's keyboard is the
-    /// one thing here that outlives the frame which started it, so releasing it cannot depend on
-    /// reaching the end of a function.
-    fn let_go(&mut self, layer: &crate::vr::Overlay<'_>) {
-        crate::keys::steal::taking(false);
-        self.keyboard_dismissed = false;
-
-        if self.typing {
-            layer.hide_keyboard();
-            self.typing = false;
-        }
-    }
-
-    fn keyboard(&mut self, layer: &crate::vr::Overlay<'_>, art: &crate::render::Renderer) {
-        let wanted = art.wants_typing();
-
-        // Focus going away is what re-arms it. Dismissing the keyboard means "not now" rather than
-        // "never again", and the next box pointed at should bring it back.
-        if !wanted {
-            self.keyboard_dismissed = false;
-        }
-
-        if wanted && !self.typing && !self.keyboard_dismissed {
-            match layer.show_keyboard("Ward", "") {
-                Ok(()) => {
-                    tracing::info!(target: "ward::vr", "keyboard up");
-                    self.typing = true;
-                }
-                Err(e) => {
-                    tracing::warn!(target: "ward::vr", error = %e, "no keyboard in the headset");
-                    // Marked as up anyway, so a refusal is one line in the log rather than one
-                    // every frame for as long as the box has focus.
-                    self.typing = true;
-                }
-            }
-        } else if !wanted && self.typing {
-            tracing::info!(target: "ward::vr", "keyboard away");
-            layer.hide_keyboard();
-            self.typing = false;
-        }
-    }
-
     /// Moves to a mode, and does nothing if it is already there.
     ///
     /// The guard is what keeps one gesture from being read as several. A grab is held across many

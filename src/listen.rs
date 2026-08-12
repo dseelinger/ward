@@ -88,16 +88,6 @@ impl PushToTalk {
     /// held by what it produces. Going position → produces, on the Commander's
     /// own layout, is what makes the setting mean the same key it names on an
     /// AZERTY keyboard as on a QWERTY one.
-    /// The virtual key a name resolves to, or zero for one Ward does not know.
-    ///
-    /// Zero rather than an option, because the caller is the keyboard hook and there is no key
-    /// numbered zero - so an unresolvable name simply spares nothing rather than needing a branch
-    /// on the path every keystroke on the machine takes.
-    #[must_use]
-    pub fn key_for(name: &str) -> u16 {
-        Self::on(name).map_or(0, |key| key.key)
-    }
-
     pub fn on(name: &str) -> Option<Self> {
         let scancode = crate::press::scancode(name)?;
 

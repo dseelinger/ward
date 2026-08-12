@@ -37,6 +37,7 @@ journal.rs       integration
 press.rs         integration
 replay.rs        integration
 secrets.rs       integration
+update.rs        integration
 
 # --- exempt -----------------------------------------------------------------
 #
@@ -46,13 +47,13 @@ capability.rs    exempt  its test module declares tool schemas as static data, w
 diag.rs          exempt  installs process-wide logging, which can only happen once per process and so cannot be exercised by more than one test
 anthropic.rs     exempt  the request and streaming path needs a service to talk to; what does not - event parsing, error messages, request composition - is tested directly. A transport seam would remove this, and that is the same seam a second provider needs
 voice.rs         exempt  synthesis is a live websocket. The half that is not - breaking a reply into what gets spoken - is covered heavily, and splitting the file would let that half carry a floor
+keys.rs          exempt  reads every key through the operating system, which needs one. The edge detection - which key is newly down, and nothing being typed until a box is listening - is pure and tested directly
 listen.rs        exempt  opens a capture device and polls a key through the operating system
 mic.rs           exempt  opens a capture device
 transcribe.rs    exempt  loads a half-gigabyte speech model that is not in the repository
 page.rs          exempt  draws the settings page, which needs a window
+surface.rs       exempt  is the widget tree both surfaces draw, so exercising it needs somewhere to draw it. What is not drawing - which mode a summon opens, what the mini panel says Ward is doing - is tested directly
 main.rs          exempt  is the window
 overlay.rs       exempt  needs a headset, or at least a Vulkan device
 render.rs        exempt  needs a graphics device
 vr.rs            exempt  needs SteamVR running
-
-update.rs        integration

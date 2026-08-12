@@ -5,6 +5,13 @@
 //! setting cannot ship without a way to change it and a control cannot outlive
 //! the setting it changed.
 //!
+//! **It holds no settings of its own.** Everything it draws comes from the
+//! picture the engine published, and everything it changes goes back as an
+//! intent. That is not tidiness: this page is drawn twice, once into the window
+//! and once into the headset, and a page holding its own copy of the settings
+//! would be two pages disagreeing about what a setting is. What is kept here is
+//! only what is being typed and has not been committed yet.
+//!
 //! Three rules the page follows, each because of a specific way this goes
 //! wrong.
 //!
@@ -25,52 +32,16 @@ use std::collections::BTreeMap;
 use eframe::egui;
 
 use crate::config::Settings;
+use crate::engine::{Intent, Listing, View};
 use crate::schema::{Catalog, Field, Row};
 
 /// Long enough to judge a voice by, short enough to hear twice.
 const PREVIEW: &str = "Ward here, Commander. This is how I sound.";
 
-/// A list that has to be fetched, and what happened when it was.
-#[derive(Default)]
-pub enum Options<T> {
-    /// Not asked for yet.
-    #[default]
-    Unasked,
-    Asking,
-    Have(T),
-    /// Carries why, because a control that silently becomes a text box looks
-    /// like a bug rather than a fallback.
-    Refused(String),
-}
-
-impl<T> Options<T> {
-    fn idle(&self) -> bool {
-        !matches!(self, Options::Asking)
-    }
-}
-
-/// One thing checked by the setup test.
-pub struct Check {
-    pub what: &'static str,
-    pub ok: bool,
-    pub detail: String,
-}
-
-/// What the page wants done, decided while drawing and carried out after.
-#[derive(Default)]
-pub struct Wants {
-    /// A setting changed, so anything built from settings is now out of date.
-    pub changed: bool,
-    /// Speak this, in the voice currently chosen, so it can be heard before
-    /// being committed to.
-    pub preview: Option<String>,
-    pub fetch_voices: bool,
-    pub fetch_models: bool,
-    pub run_setup_test: bool,
-    pub store_key: Option<String>,
-}
-
 /// Everything the page is holding that is not a setting.
+///
+/// All of it is text mid-edit. Nothing here survives being committed, and
+/// nothing here is the truth about anything — the truth is in the picture.
 #[derive(Default)]
 pub struct Page {
     /// What is in each box. Held apart from the settings themselves, so a value
@@ -78,13 +49,8 @@ pub struct Page {
     typed: BTreeMap<String, String>,
     /// Why a box was refused, under the box that was refused.
     problems: BTreeMap<String, String>,
-    pub voices: Options<Vec<crate::voice::Voice>>,
-    pub models: Options<Vec<String>>,
     search: String,
     key_entry: String,
-    pub key_problem: Option<String>,
-    pub checks: Vec<Check>,
-    pub testing: bool,
 }
 
 impl Page {
@@ -92,11 +58,6 @@ impl Page {
     pub fn reread(&mut self) {
         self.typed.clear();
         self.problems.clear();
-    }
-
-    pub fn key_stored(&mut self) {
-        self.key_entry.clear();
-        self.key_problem = None;
     }
 
     fn box_for(&mut self, key: &str, settings: &Settings) -> String {
@@ -111,14 +72,7 @@ impl Page {
             .clone()
     }
 
-    pub fn show(
-        &mut self,
-        ui: &mut egui::Ui,
-        settings: &mut Settings,
-        key_is_stored: bool,
-    ) -> Wants {
-        let mut wants = Wants::default();
-
+    pub fn show(&mut self, ui: &mut egui::Ui, view: &View, out: &mut Vec<Intent>) {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -127,8 +81,8 @@ impl Page {
                 ui.weak("Only what you change is written down. Empty a box to put it back.");
                 ui.add_space(12.0);
 
-                self.keys_card(ui, key_is_stored, &mut wants);
-                self.setup_card(ui, &mut wants);
+                self.keys_card(ui, view, out);
+                self.setup_card(ui, view, out);
 
                 for card in crate::schema::cards() {
                     ui.add_space(12.0);
@@ -138,24 +92,16 @@ impl Page {
                         ui.add_space(4.0);
 
                         for row in crate::schema::all().into_iter().filter(|r| r.card == card) {
-                            self.row(ui, row, settings, &mut wants);
+                            self.row(ui, row, view, out);
                         }
                     });
                 }
 
                 ui.add_space(24.0);
             });
-
-        wants
     }
 
-    fn row(
-        &mut self,
-        ui: &mut egui::Ui,
-        row: &'static Row,
-        settings: &mut Settings,
-        wants: &mut Wants,
-    ) {
+    fn row(&mut self, ui: &mut egui::Ui, row: &'static Row, view: &View, out: &mut Vec<Intent>) {
         ui.add_space(10.0);
 
         ui.horizontal(|ui| {
@@ -169,17 +115,16 @@ impl Page {
                 );
             }
 
-            if settings.overridden(row.key) {
+            if view.settings.overridden(row.key) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .small_button("Reset")
                         .on_hover_text("Put this back to what Ward ships")
                         .clicked()
                     {
-                        settings.clear(row.key);
+                        out.push(Intent::Clear(row.key));
                         self.typed.remove(row.key);
                         self.problems.remove(row.key);
-                        wants.changed = true;
                     }
                 });
             }
@@ -187,17 +132,15 @@ impl Page {
 
         ui.weak(row.help);
 
-        // Named rather than linked. The site is not published yet, and a link
-        // that goes nowhere is worse than a path somebody can open.
         if let Some(doc) = row.doc {
             ui.weak(format!("Explained in {doc}"));
         }
 
         match row.kind {
-            Field::Flag => self.flag(ui, row, settings, wants),
-            Field::Choice(Catalog::Voices) => self.voice(ui, row, settings, wants),
-            Field::Choice(Catalog::Models) => self.model(ui, row, settings, wants),
-            _ => self.text(ui, row, settings, wants),
+            Field::Flag => self.flag(ui, row, view, out),
+            Field::Choice(Catalog::Voices) => self.voice(ui, row, view, out),
+            Field::Choice(Catalog::Models) => self.model(ui, row, view, out),
+            _ => self.text(ui, row, view, out),
         }
 
         if let Some(problem) = self.problems.get(row.key) {
@@ -207,29 +150,16 @@ impl Page {
 
     /// A checkbox has no empty state, so this one commits on click rather than
     /// leaving a default behind an empty box. Resetting is the button above.
-    fn flag(
-        &mut self,
-        ui: &mut egui::Ui,
-        row: &'static Row,
-        settings: &mut Settings,
-        wants: &mut Wants,
-    ) {
-        let mut on = settings.flag(row.key);
+    fn flag(&mut self, ui: &mut egui::Ui, row: &'static Row, view: &View, out: &mut Vec<Intent>) {
+        let mut on = view.settings.flag(row.key);
 
         if ui.checkbox(&mut on, "").changed() {
-            settings.set(row.key, serde_json::json!(on));
-            wants.changed = true;
+            out.push(Intent::Set(row.key, serde_json::json!(on)));
         }
     }
 
-    fn text(
-        &mut self,
-        ui: &mut egui::Ui,
-        row: &'static Row,
-        settings: &mut Settings,
-        wants: &mut Wants,
-    ) {
-        let mut typed = self.box_for(row.key, settings);
+    fn text(&mut self, ui: &mut egui::Ui, row: &'static Row, view: &View, out: &mut Vec<Intent>) {
+        let mut typed = self.box_for(row.key, &view.settings);
         let placeholder = crate::schema::write(&(row.default)());
 
         let field = ui.add(
@@ -245,27 +175,19 @@ impl Page {
         let done = field.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
 
         if done && field.changed() || (done && self.problems.contains_key(row.key)) {
-            self.commit(row, &typed, settings, wants);
+            self.commit(row, &typed, out);
         }
     }
 
-    fn commit(
-        &mut self,
-        row: &'static Row,
-        typed: &str,
-        settings: &mut Settings,
-        wants: &mut Wants,
-    ) {
+    fn commit(&mut self, row: &'static Row, typed: &str, out: &mut Vec<Intent>) {
         match crate::schema::read(row, typed) {
             Ok(Some(value)) => {
-                settings.set(row.key, value);
+                out.push(Intent::Set(row.key, value));
                 self.problems.remove(row.key);
-                wants.changed = true;
             }
             Ok(None) => {
-                settings.clear(row.key);
+                out.push(Intent::Clear(row.key));
                 self.problems.remove(row.key);
-                wants.changed = true;
             }
             Err(why) => {
                 self.problems.insert(row.key.to_string(), why);
@@ -273,53 +195,32 @@ impl Page {
         }
     }
 
-    fn model(
-        &mut self,
-        ui: &mut egui::Ui,
-        row: &'static Row,
-        settings: &mut Settings,
-        wants: &mut Wants,
-    ) {
-        let current = settings.string(row.key);
+    fn model(&mut self, ui: &mut egui::Ui, row: &'static Row, view: &View, out: &mut Vec<Intent>) {
+        let current = view.settings.string(row.key);
 
-        // Taken out of the field before anything else on the page is touched.
-        // Holding a borrow on the list while drawing a fallback that also needs
-        // the page is the same mistake as reading and writing one setting in a
-        // single expression.
-        let listed = match &self.models {
-            Options::Have(models) => Some(models.clone()),
-            _ => None,
-        };
-
-        if let Some(models) = listed {
+        if let Listing::Have(models) = &view.models {
             egui::ComboBox::from_id_salt(row.key)
                 .selected_text(&current)
                 .width(ui.available_width() - 8.0)
                 .show_ui(ui, |ui| {
-                    for model in &models {
+                    for model in models {
                         if ui.selectable_label(*model == current, model).clicked() {
-                            settings.set(row.key, serde_json::json!(model));
-                            wants.changed = true;
+                            out.push(Intent::Set(row.key, serde_json::json!(model)));
                         }
                     }
                 });
             return;
         }
 
-        let refused = match &self.models {
-            Options::Refused(why) => Some(why.clone()),
-            _ => None,
-        };
-
-        if let Some(why) = refused {
+        if let Listing::Refused(why) = &view.models {
             ui.weak(format!("Type it in — {why}"));
         }
 
-        let idle = self.models.idle();
-        self.text(ui, row, settings, wants);
+        let idle = view.models.idle();
+        self.text(ui, row, view, out);
 
         if idle && ui.small_button("Fetch the list").clicked() {
-            wants.fetch_models = true;
+            out.push(Intent::Models);
         }
     }
 
@@ -329,57 +230,40 @@ impl Page {
     /// so a text box holding a name from memory is not a way to choose. Hearing
     /// it is the whole decision — a voice reads differently in a cockpit than
     /// its name suggests.
-    fn voice(
-        &mut self,
-        ui: &mut egui::Ui,
-        row: &'static Row,
-        settings: &mut Settings,
-        wants: &mut Wants,
-    ) {
-        let current = settings.string(row.key);
+    fn voice(&mut self, ui: &mut egui::Ui, row: &'static Row, view: &View, out: &mut Vec<Intent>) {
+        let current = view.settings.string(row.key);
 
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&current).monospace());
 
             if ui.small_button("Hear it").clicked() {
-                wants.preview = Some(PREVIEW.to_string());
+                out.push(Intent::Preview(PREVIEW.to_string()));
             }
         });
 
-        if !matches!(self.voices, Options::Have(_)) {
-            let refused = match &self.voices {
-                Options::Refused(why) => Some(why.clone()),
-                _ => None,
-            };
-
-            if let Some(why) = refused {
+        let Listing::Have(voices) = &view.voices else {
+            if let Listing::Refused(why) = &view.voices {
                 ui.weak(format!("Type a voice name — {why}"));
             }
 
-            let idle = self.voices.idle();
-            self.text(ui, row, settings, wants);
+            let idle = view.voices.idle();
+            self.text(ui, row, view, out);
 
             if idle && ui.button("Browse voices").clicked() {
-                wants.fetch_voices = true;
+                out.push(Intent::Voices);
             }
 
-            return;
-        }
-
-        // Split apart so the search box and the list can be touched at once.
-        let Page { voices, search, .. } = self;
-        let Options::Have(voices) = voices else {
             return;
         };
 
         ui.add_space(4.0);
         ui.add(
-            egui::TextEdit::singleline(search)
+            egui::TextEdit::singleline(&mut self.search)
                 .hint_text("Search — a name, a language, a country")
                 .desired_width(ui.available_width() - 8.0),
         );
 
-        let needle = search.trim().to_lowercase();
+        let needle = self.search.trim().to_lowercase();
 
         let matching: Vec<&crate::voice::Voice> = voices
             .iter()
@@ -387,8 +271,6 @@ impl Page {
             .collect();
 
         ui.weak(format!("{} of {} voices", matching.len(), voices.len()));
-
-        let mut chosen: Option<String> = None;
 
         egui::ScrollArea::vertical()
             .id_salt("voices")
@@ -401,19 +283,14 @@ impl Page {
                     );
 
                     if ui.selectable_label(voice.name == current, label).clicked() {
-                        chosen = Some(voice.name.clone());
+                        out.push(Intent::Set(row.key, serde_json::json!(voice.name)));
+                        // Heard the moment it is picked. Choosing from a list of
+                        // names and then having to ask separately is one step too
+                        // many for something you are about to listen to for hours.
+                        out.push(Intent::Preview(PREVIEW.to_string()));
                     }
                 }
             });
-
-        if let Some(name) = chosen {
-            settings.set(row.key, serde_json::json!(name));
-            wants.changed = true;
-            // Heard the moment it is picked. Choosing from a list of names and
-            // then having to ask separately is one step too many for something
-            // you are about to listen to for hours.
-            wants.preview = Some(PREVIEW.to_string());
-        }
     }
 
     /// Hand-built, because a key is not a setting.
@@ -421,13 +298,13 @@ impl Page {
     /// It never appears on screen, it is never read back, and all the page ever
     /// shows is whether there is one. A key rendered into a text box is a key in
     /// the next screenshot or stream.
-    fn keys_card(&mut self, ui: &mut egui::Ui, stored: bool, wants: &mut Wants) {
+    fn keys_card(&mut self, ui: &mut egui::Ui, view: &View, out: &mut Vec<Intent>) {
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             ui.heading("API key");
             ui.add_space(4.0);
 
-            match stored {
+            match view.key_stored {
                 true => ui.label("A key is stored. Ward can show it to nobody, including you."),
                 false => ui.colored_label(egui::Color32::from_rgb(210, 160, 60), "No key stored."),
             };
@@ -443,7 +320,7 @@ impl Page {
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut self.key_entry)
                         .password(true)
-                        .hint_text(match stored {
+                        .hint_text(match view.key_stored {
                             true => "Paste a new key to replace it",
                             false => "sk-ant-…",
                         })
@@ -453,11 +330,12 @@ impl Page {
                 let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
                 if (ui.button("Save").clicked() || entered) && !self.key_entry.trim().is_empty() {
-                    wants.store_key = Some(self.key_entry.trim().to_string());
+                    out.push(Intent::Key(self.key_entry.trim().to_string()));
+                    self.key_entry.clear();
                 }
             });
 
-            if let Some(problem) = &self.key_problem {
+            if let Some(problem) = &view.key_problem {
                 ui.colored_label(ui.visuals().error_fg_color, problem);
             }
         });
@@ -469,7 +347,7 @@ impl Page {
     /// a microphone that was never chosen, a key that was refused, a journal
     /// folder pointing at nothing. All of them fail silently in flight, which
     /// is the worst possible place to find out.
-    fn setup_card(&mut self, ui: &mut egui::Ui, wants: &mut Wants) {
+    fn setup_card(&mut self, ui: &mut egui::Ui, view: &View, out: &mut Vec<Intent>) {
         ui.add_space(12.0);
 
         ui.group(|ui| {
@@ -483,17 +361,17 @@ impl Page {
             ui.add_space(6.0);
 
             if ui
-                .add_enabled(!self.testing, egui::Button::new("Run the test"))
+                .add_enabled(!view.testing, egui::Button::new("Run the test"))
                 .clicked()
             {
-                wants.run_setup_test = true;
+                out.push(Intent::TestSetup);
             }
 
-            if self.testing {
+            if view.testing {
                 ui.weak("Testing…");
             }
 
-            for check in &self.checks {
+            for check in &view.checks {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     match check.ok {
@@ -536,10 +414,66 @@ mod tests {
     fn a_list_that_was_refused_is_not_still_being_asked_for() {
         // The refused state has to offer the button again, or a failed fetch
         // leaves the setting unreachable for the rest of the session.
-        let refused: Options<Vec<String>> = Options::Refused("no network".into());
+        let refused: Listing<Vec<String>> = Listing::Refused("no network".into());
         assert!(refused.idle());
 
-        let asking: Options<Vec<String>> = Options::Asking;
+        let asking: Listing<Vec<String>> = Listing::Asking;
         assert!(!asking.idle(), "it would ask twice at once");
+    }
+
+    #[test]
+    fn a_committed_box_asks_the_engine_rather_than_writing_a_setting() {
+        // The page holds no settings, so the only thing a commit can produce is
+        // an intent. If this ever went back to mutating a Settings of its own,
+        // the headset and the window would each have one and they would drift.
+        let mut page = Page::default();
+        let mut out = Vec::new();
+        let row = crate::schema::row("text size").expect("text size is a setting");
+
+        page.commit(row, "1.8", &mut out);
+
+        // Compared as a number rather than against a literal. The schema reads this row as an
+        // `f32` and JSON holds an `f64`, so the widened value is not bit-for-bit the `1.8` a test
+        // would write - and asserting on the wrong one of those fails on a correct commit.
+        let [Intent::Set("text size", value)] = out.as_slice() else {
+            panic!(
+                "a good value should be one Set and nothing else, got {} intents",
+                out.len()
+            );
+        };
+
+        let stored = value.as_f64().expect("a number setting stores a number");
+        assert!((stored - 1.8).abs() < 1e-6, "stored {stored}");
+    }
+
+    #[test]
+    fn emptying_a_box_asks_for_the_default_rather_than_storing_nothing() {
+        let mut page = Page::default();
+        let mut out = Vec::new();
+        let row = crate::schema::row("speaking rate").expect("speaking rate is a setting");
+
+        page.commit(row, "   ", &mut out);
+
+        assert!(
+            matches!(out.as_slice(), [Intent::Clear("speaking rate")]),
+            "an emptied box should clear rather than store an empty string"
+        );
+    }
+
+    #[test]
+    fn a_refused_value_asks_for_nothing_and_says_why() {
+        // The failure that matters: a bad value that still reaches the engine is
+        // a setting the Commander did not choose, applied because they typed.
+        let mut page = Page::default();
+        let mut out = Vec::new();
+        let row = crate::schema::row("text size").expect("text size is a setting");
+
+        page.commit(row, "40", &mut out);
+
+        assert!(out.is_empty(), "a refused value must not reach the engine");
+        assert!(
+            page.problems.contains_key("text size"),
+            "and the box has to say why"
+        );
     }
 }

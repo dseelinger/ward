@@ -235,6 +235,17 @@ static TOOLS: &[Tool] = &[
         }],
     },
     Tool {
+        name: "checklist_reopen",
+        description: "Puts a finished item back on the checklist as still to do.                       Use this when the Commander says one was ticked by mistake,                       or that they have to do it again after all.",
+        slots: &[Slot {
+            param: "item",
+            kind: Kind::Text,
+            required: true,
+            help: "Enough of the item to identify it. Part of it is enough.",
+            example: "tritium",
+        }],
+    },
+    Tool {
         name: "checklist_remove",
         description: "Takes an item off the checklist entirely, as though it \
                       had never been added. Use this when the Commander says \
@@ -403,6 +414,41 @@ impl Checklist {
         }
     }
 
+    /// Puts a finished item back on the list.
+    ///
+    /// The mirror of [`Self::complete`], and it exists because the panel needed one. A ticked box
+    /// that could not be unticked was the surface obeying a rule about the model — that no control
+    /// may do something the voice cannot — by removing the control rather than by adding the tool.
+    /// This is the other way round, and now both surfaces and the model can all do it.
+    fn reopen(&self, phrase: &str) -> String {
+        let mut lines = self.held();
+
+        match find(&lines, phrase) {
+            Match::None => nothing_like(phrase, &lines),
+            Match::Several(names) => ambiguous(phrase, &names),
+            Match::One(at) => {
+                let Line::Item { text, done } = &mut lines[at] else {
+                    return nothing_like(phrase, &lines);
+                };
+
+                if !*done {
+                    return format!("\"{text}\" was not done anyway.");
+                }
+
+                *done = false;
+                let text = text.clone();
+
+                let left = tasks(&lines).iter().filter(|(_, _, done)| !done).count();
+                let trouble = self.save(&lines);
+
+                match left {
+                    1 => format!("\"{text}\" is back on the list. One left.{trouble}"),
+                    n => format!("\"{text}\" is back on the list. {n} left.{trouble}"),
+                }
+            }
+        }
+    }
+
     fn remove(&self, phrase: &str) -> String {
         let mut lines = self.held();
 
@@ -481,6 +527,7 @@ impl Capability for Checklist {
         match tool {
             "checklist_add" => self.add(item),
             "checklist_complete" => self.complete(item),
+            "checklist_reopen" => self.reopen(item),
             "checklist_remove" => self.remove(item),
             "checklist_read" => self.shown().spoken(),
             other => format!("The checklist has no tool called {other}."),
@@ -513,6 +560,53 @@ mod tests {
             panic!("a checklist should show as a list");
         };
         rows
+    }
+
+    #[test]
+    fn a_ticked_item_can_be_put_back() {
+        // The panel needed this before the model did: a tick box that could not be unticked was
+        // the surface honoring a rule about the model by removing the control instead of adding
+        // the tool.
+        let list = fresh("reopen");
+        list.run("checklist_add", &json!({"item": "buy tritium"}));
+        list.run("checklist_complete", &json!({"item": "tritium"}));
+
+        assert!(rows_of(&list)[0].done, "it should be done to begin with");
+
+        let answer = list.run("checklist_reopen", &json!({"item": "tritium"}));
+
+        assert!(!rows_of(&list)[0].done, "got: {answer}");
+        assert!(answer.contains("back on the list"), "got: {answer}");
+    }
+
+    #[test]
+    fn putting_back_something_that_was_never_done_says_so() {
+        // Rather than reporting a change nobody made. The same shape as completing something
+        // twice, which already answers "was already done".
+        let list = fresh("reopen-undone");
+        list.run("checklist_add", &json!({"item": "buy tritium"}));
+
+        let answer = list.run("checklist_reopen", &json!({"item": "tritium"}));
+        assert!(answer.contains("not done anyway"), "got: {answer}");
+    }
+
+    #[test]
+    fn putting_an_item_back_survives_being_written_out() {
+        // The whole point is the file. A reopen that only changed what was in memory would read
+        // as working and be gone at the next start.
+        let path = temp("reopen-durable");
+        let list = Checklist::load(&path);
+        list.run("checklist_add", &json!({"item": "buy tritium"}));
+        list.run("checklist_complete", &json!({"item": "tritium"}));
+        list.run("checklist_reopen", &json!({"item": "tritium"}));
+
+        let written = std::fs::read_to_string(&path).expect("the list was written");
+        assert!(written.contains("- [ ] buy tritium"), "got: {written}");
+
+        assert!(
+            !rows_of(&Checklist::load(&path))[0].done,
+            "it came back done"
+        );
     }
 
     #[test]

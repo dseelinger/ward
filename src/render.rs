@@ -68,29 +68,29 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Draws egui into an offscreen image.
-pub struct Renderer {
+/// One Vulkan device, shared by every layer in the headset.
+///
+/// **There is exactly one of these per process, and that is not a saving.** OpenVR keeps its
+/// Vulkan state per process rather than per texture, so handing the compositor images from two
+/// devices corrupts it — and it does not fail politely. Two renderers, each with a device of its
+/// own, ran perfectly until the first caption appeared while the panel was also up, and then took
+/// `vrclient_x64.dll` down with an access violation inside OpenVR's own code.
+///
+/// That is the specific reason this type exists. The layers above own their own image, their own
+/// widget tree and their own input; they borrow the one device underneath.
+pub struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     adapter_info: wgpu::AdapterInfo,
-    target: wgpu::Texture,
-    /// Destination for the one-texel copy that ends each frame. Written, never read.
-    settled: wgpu::Buffer,
-    size: (u32, u32),
-    context: egui::Context,
-    painter: egui_wgpu::Renderer,
-    pointer: Option<egui::Pos2>,
-    pressed: bool,
-    was_pressed: bool,
 }
 
-impl Renderer {
-    /// Brings up Vulkan on the best adapter available and makes an image to draw into.
+impl Gpu {
+    /// Brings up Vulkan on the best adapter available.
     ///
     /// # Errors
     ///
     /// Fails if there is no Vulkan adapter, or if the one found will not give up a device.
-    pub fn new(width: u32, height: u32) -> Result<Self, Error> {
+    pub fn new() -> Result<Self, Error> {
         // Vulkan only. DX12 would work for drawing and then have nothing to hand OpenVR, which
         // is a failure three steps downstream of its cause.
         // No display handle: there is no window and there is never going to be one here.
@@ -112,14 +112,57 @@ impl Renderer {
         }))
         .map_err(Error::NoDevice)?;
 
-        let target = make_target(&device, width, height);
+        Ok(Self {
+            device,
+            queue,
+            adapter_info,
+        })
+    }
+
+    /// Which adapter this ended up on, and over which backend.
+    #[must_use]
+    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
+        &self.adapter_info
+    }
+}
+
+/// Draws egui into an offscreen image.
+pub struct Renderer {
+    gpu: std::sync::Arc<Gpu>,
+    target: wgpu::Texture,
+    /// Destination for the one-texel copy that ends each frame. Written, never read.
+    settled: wgpu::Buffer,
+    size: (u32, u32),
+    context: egui::Context,
+    painter: egui_wgpu::Renderer,
+    pointer: Option<egui::Pos2>,
+    pressed: bool,
+    was_pressed: bool,
+    /// Scrolling that arrived since the last frame, waiting to be delivered.
+    scrolled: egui::Vec2,
+    /// What was typed since the last frame, already in the toolkit's terms.
+    typing: Vec<egui::Event>,
+    /// What a cut or a copy asked to be put on the clipboard, waiting to be collected.
+    copied: Option<String>,
+}
+
+impl Renderer {
+    /// Makes an image to draw into, on a device somebody else owns.
+    ///
+    /// Infallible, because everything that can go wrong went wrong in [`Gpu::new`]. That is the
+    /// point of the split: bringing Vulkan up is a thing that happens once and can fail, and
+    /// adding a layer to a device that already works cannot.
+    pub fn new(gpu: &std::sync::Arc<Gpu>, width: u32, height: u32) -> Self {
+        let device = &gpu.device;
+
+        let target = make_target(device, width, height);
         let settled = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("overlay layout settle"),
             size: 4,
             usage: wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let painter = egui_wgpu::Renderer::new(&device, FORMAT, RendererOptions::default());
+        let painter = egui_wgpu::Renderer::new(device, FORMAT, RendererOptions::default());
 
         // Tell egui it is being pointed at rather than moused at.
         //
@@ -139,10 +182,8 @@ impl Renderer {
             options.input_options.max_click_duration = f64::INFINITY;
         });
 
-        Ok(Self {
-            device,
-            queue,
-            adapter_info,
+        Self {
+            gpu: gpu.clone(),
             target,
             settled,
             size: (width, height),
@@ -151,7 +192,10 @@ impl Renderer {
             pointer: None,
             pressed: false,
             was_pressed: false,
-        })
+            scrolled: egui::Vec2::ZERO,
+            typing: Vec::new(),
+            copied: None,
+        }
     }
 
     /// The image as bytes, so a caption can be looked at without a headset.
@@ -166,7 +210,7 @@ impl Renderer {
         let padded = aligned.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("read back"),
             size: u64::from(padded) * u64::from(height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
@@ -174,6 +218,7 @@ impl Renderer {
         });
 
         let mut encoder = self
+            .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("read back"),
@@ -194,11 +239,12 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.gpu.queue.submit(std::iter::once(encoder.finish()));
 
         let slice = buffer.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device
+        self.gpu
+            .device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("the queue drains");
 
@@ -215,10 +261,143 @@ impl Renderer {
         pixels
     }
 
-    /// Which adapter this ended up on, and over which backend.
+    /// How big the image currently is, in pixels.
     #[must_use]
-    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
-        &self.adapter_info
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    /// Draws into an image of a different size from now on.
+    ///
+    /// A texture cannot change size, so this makes a new one and lets the old go. That is why it
+    /// is called on a mode change rather than every frame.
+    ///
+    /// The mini panel needs this rather than being the big one shrunk. An overlay is scaled from
+    /// its image to its width in metres, so drawing four lines into a full-size image and hanging
+    /// it at a third of a metre gives text a third of the size — which is the one thing a surface
+    /// meant to be read at a glance cannot be.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if self.size == (width, height) {
+            return;
+        }
+
+        self.target = make_target(&self.gpu.device, width, height);
+        self.size = (width, height);
+    }
+
+    /// Where the Commander is pointing, in the image's own pixels, or `None` when the ray is not
+    /// on the panel at all.
+    ///
+    /// Pixels in and points out. The caller has an overlay measured in pixels and no reason to
+    /// know that egui lays out in something smaller, and [`SCALE`] is the conversion — it lives
+    /// here, so there is one place that knows it rather than two that have to agree.
+    pub fn point_at(&mut self, at: Option<(f32, f32)>) {
+        self.pointer = at.map(|(x, y)| egui::pos2(x / SCALE, y / SCALE));
+    }
+
+    /// Whether the trigger is held.
+    ///
+    /// Recorded rather than delivered. The edge is what egui is told about, and [`Self::draw`]
+    /// works out where the edge is — because a press and a release that both happened between two
+    /// frames still have to arrive as two events in the right order.
+    pub fn press(&mut self, down: bool) {
+        self.pressed = down;
+    }
+
+    /// Takes what SteamVR's keyboard reported, and puts it in whatever has focus.
+    ///
+    /// Characters rather than key presses, because that is what the keyboard sends and what a
+    /// text field wants. The two exceptions are the two that are not characters at all: a
+    /// backspace arrives as a control byte and has to become the key, or it would go into the box
+    /// as an invisible character and the Commander could never correct a mistake.
+    pub fn typed(&mut self, text: &str) {
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        };
+
+        for character in text.chars() {
+            match character {
+                // Backspace, and delete, which some layouts send instead.
+                '\u{8}' | '\u{7f}' => self.typing.push(key(egui::Key::Backspace)),
+                '\r' | '\n' => self.typing.push(key(egui::Key::Enter)),
+                // Escape, which is how somebody gets out of a text box that will not let go of
+                // them. The toolkit surrenders focus on it, and focus is what decides whether Ward
+                // is holding the Commander's keyboard — so this is the way out of that as well.
+                '\u{1b}' => self.typing.push(key(egui::Key::Escape)),
+                // Everything else that is not a control code. A stray one typed into a folder
+                // path is a setting that will never resolve, with nothing on screen to say why.
+                other if !other.is_control() => {
+                    self.typing.push(egui::Event::Text(other.to_string()));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Hands the toolkit one of the clipboard shortcuts.
+    ///
+    /// A cut or a copy is a question rather than an instruction: egui answers it by putting the
+    /// selected text into its output, which [`Self::copied`] hands back for whoever owns the real
+    /// clipboard to write. A paste already carries the text, because reading the clipboard is the
+    /// caller's job and not the toolkit's.
+    pub fn clipboard(&mut self, what: &crate::keys::Typed) {
+        // Text goes through `typed` rather than becoming an event here. Writing it out again was
+        // the same three lines with the interesting part left off: a backspace arrives as a
+        // control byte and has to become the key, and the rest of the control codes have to be
+        // dropped. Handed to the toolkit as text, a backspace puts an invisible character into the
+        // box instead of taking one out of it.
+        let event = match what {
+            crate::keys::Typed::Text(text) => return self.typed(text),
+            crate::keys::Typed::Copy => egui::Event::Copy,
+            crate::keys::Typed::Cut => egui::Event::Cut,
+            crate::keys::Typed::Paste(text) => egui::Event::Paste(text.clone()),
+        };
+
+        self.typing.push(event);
+    }
+
+    /// Text the toolkit wants put on the clipboard, if a cut or a copy asked for any.
+    #[must_use]
+    pub fn copied(&mut self) -> Option<String> {
+        self.copied.take()
+    }
+
+    /// Whether anything on the panel is waiting to be typed into.
+    ///
+    /// Asked of the toolkit rather than tracked here, so a box that takes focus because something
+    /// else asked for it — the compose field re-focusing itself after a question — opens the
+    /// keyboard the same way a box the Commander pointed at does.
+    #[must_use]
+    pub fn wants_typing(&self) -> bool {
+        self.context.egui_wants_keyboard_input()
+    }
+
+    /// Adds a wheel's worth of scrolling, to be delivered on the next frame.
+    ///
+    /// Accumulated rather than replaced. Several scroll events routinely arrive between two of
+    /// this panel's frames, and keeping only the last one would throw away most of a flick.
+    pub fn scroll(&mut self, x: f32, y: f32) {
+        self.scrolled += egui::vec2(x, y);
+    }
+
+    /// Runs one frame of egui, draws the result into the image, and hands back whatever the
+    /// widget tree decided.
+    ///
+    /// The panel's tree reports what the Commander asked for as its return value, and there is
+    /// nowhere else for that to come out: egui hands back the shapes it drew, not what the closure
+    /// thought.
+    pub fn draw_with<T>(&mut self, mut build: impl FnMut(&mut egui::Ui) -> T) -> T {
+        let mut decided = None;
+        self.draw(|ui| decided = Some(build(ui)));
+
+        // egui runs the closure exactly once per pass. If that ever stops being true this is a
+        // panic rather than a wrong answer, which is the right way round for a frame that was
+        // never drawn.
+        decided.expect("egui runs the widget tree once per frame")
     }
 
     /// Runs one frame of egui and draws the result into the image.
@@ -252,6 +431,25 @@ impl Renderer {
             None => events.push(egui::Event::PointerGone),
         }
 
+        // Taken rather than read, so a wheel's turn is delivered once. Left in place it would be
+        // reapplied every frame and the panel would scroll forever from one flick.
+        // Drained for the same reason the scrolling below is: delivered once, rather than
+        // retyped every frame for as long as nothing else arrives.
+        events.append(&mut self.typing);
+
+        let scrolled = std::mem::replace(&mut self.scrolled, egui::Vec2::ZERO);
+        if scrolled != egui::Vec2::ZERO {
+            events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: scrolled,
+                modifiers: egui::Modifiers::default(),
+                // Discrete wheel turns rather than a touchpad's stream, so there is no gesture
+                // with a beginning and an end for egui to track. `Move` is what egui documents
+                // for a phase that is not known.
+                phase: egui::TouchPhase::Move,
+            });
+        }
+
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -273,18 +471,23 @@ impl Renderer {
         for (id, deltas) in &output.textures_delta.set {
             for delta in deltas {
                 self.painter
-                    .update_texture(&self.device, &self.queue, *id, delta);
+                    .update_texture(&self.gpu.device, &self.gpu.queue, *id, delta);
             }
         }
 
         let mut encoder = self
+            .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("overlay frame"),
             });
-        let staged =
-            self.painter
-                .update_buffers(&self.device, &self.queue, &mut encoder, &jobs, &screen);
+        let staged = self.painter.update_buffers(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &mut encoder,
+            &jobs,
+            &screen,
+        );
 
         {
             let view = self.target.create_view(&wgpu::TextureViewDescriptor {
@@ -346,8 +549,18 @@ impl Renderer {
             },
         );
 
-        self.queue
+        self.gpu
+            .queue
             .submit(staged.into_iter().chain(std::iter::once(encoder.finish())));
+
+        // What the toolkit wants on the clipboard. It is an answer to the cut or copy handed in
+        // above, and it is the only way out: egui has no clipboard of its own and never will.
+        for command in output.platform_output.commands.drain(..) {
+            let egui::OutputCommand::CopyText(text) = command else {
+                continue;
+            };
+            self.copied = Some(text);
+        }
 
         for id in &output.textures_delta.free {
             self.painter.free_texture(id);
@@ -374,8 +587,8 @@ impl Renderer {
         // live as long as this Renderer.
         unsafe {
             let texture = self.target.as_hal::<Vulkan>()?;
-            let device = self.device.as_hal::<Vulkan>()?;
-            let queue = self.queue.as_hal::<Vulkan>()?;
+            let device = self.gpu.device.as_hal::<Vulkan>()?;
+            let queue = self.gpu.queue.as_hal::<Vulkan>()?;
 
             Some(crate::vr::VulkanImage {
                 image: ash::vk::Handle::as_raw(texture.raw_handle()),

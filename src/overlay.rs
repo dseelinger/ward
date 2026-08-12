@@ -1,99 +1,138 @@
-//! Putting captions in the headset, and taking them away again.
+//! Putting Ward in the headset, and taking it away again.
 //!
-//! A thread of its own, because everything here runs on somebody else's clock.
-//! SteamVR may not be running when Ward starts, may start later, and may stop
-//! while Ward carries on — and none of that is allowed to be a problem for the
-//! window, the voice or the turn.
+//! Two layers, on one thread, from one OpenVR session.
 //!
-//! **It keeps asking.** Trying once and giving up is the specific way this
-//! fails: Ward is started before the game, SteamVR comes up two minutes later,
-//! and nothing ever appears with nothing to explain why. So the loop below is
-//! written around the assumption that the headset is usually *not* there yet.
+//! - **Captions** are output only and ephemeral. They follow the head, they take no input, and
+//!   when there is nothing to say there is nothing over the cockpit at all.
+//! - **The panel** is furniture. It is put down in the room, it stays where it was put, and it
+//!   can be pointed at and clicked. It draws [`crate::surface`], which is the same widget tree
+//!   the window draws, so it cannot fall behind what the window can do.
 //!
-//! **It disappears when there is nothing to say.** The overlay is hidden unless
-//! a caption is live, so an empty caption layer is not a rectangle floating over
-//! the cockpit — it is nothing at all.
+//! A thread of its own, because everything here runs on somebody else's clock. SteamVR may not be
+//! running when Ward starts, may start later, and may stop while Ward carries on — and none of
+//! that is allowed to be a problem for the window, the voice or the turn.
+//!
+//! **It keeps asking.** Trying once and giving up is the specific way this fails: Ward is started
+//! before the game, SteamVR comes up two minutes later, and nothing ever appears with nothing to
+//! explain why. So the loop below is written around the assumption that the headset is usually
+//! *not* there yet.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::captions::Captions;
+use crate::engine::Handle;
+use crate::listen::{Gate, PushToTalk};
+use crate::surface::Mode;
 
 /// How often the caption layer is redrawn while something is on screen.
 ///
-/// Captions are text that changes a few times a minute, not an animation. The
-/// compositor holds the last image handed to it, so drawing more often than
-/// this buys nothing and takes a slice of the machine Elite is drawing frames
-/// with.
+/// Captions are text that changes a few times a minute, not an animation. The compositor holds the
+/// last image handed to it, so drawing more often than this buys nothing and takes a slice of the
+/// machine Elite is drawing frames with.
 const REDRAW: Duration = Duration::from_millis(100);
+
+/// How often the panel is redrawn while it is showing.
+///
+/// Faster than the captions, and for one reason: a pointer that updates ten times a second reads
+/// as broken. This is the rate a cursor has to move at to feel attached to the hand, and it is
+/// paid only while the panel is actually on screen — a hidden panel costs nothing at all.
+const POINTING: Duration = Duration::from_millis(16);
 
 /// How long to wait before asking SteamVR again.
 ///
-/// Long enough that a Commander who never uses VR is not paying for a failing
-/// call every second, short enough that starting SteamVR after Ward feels like
-/// it worked rather than like it eventually worked.
+/// Long enough that a Commander who never uses VR is not paying for a failing call every second,
+/// short enough that starting SteamVR after Ward feels like it worked rather than like it
+/// eventually worked.
 const RETRY: Duration = Duration::from_secs(5);
 
 /// How wide the caption layer is, in metres.
 ///
-/// At the distance below this subtends about thirty degrees, which is roughly
-/// what a subtitle band occupies on a television watched from a sofa. The first
-/// attempt was 1.4 metres and read as enormous: at this distance that is
-/// close to fifty degrees, so a caption filled the middle of the view and the
-/// cockpit was behind it rather than around it.
+/// At the distance below this subtends about thirty degrees, which is roughly what a subtitle band
+/// occupies on a television watched from a sofa. The first attempt was 1.4 metres and read as
+/// enormous: at this distance that is close to fifty degrees, so a caption filled the middle of
+/// the view and the cockpit was behind it rather than around it.
 const WIDTH: f32 = 0.9;
+
+/// How wide each mode of the panel is, in metres.
+///
+/// The big one is a screen you turn to look at, near enough arm's length. The mini one is a watch
+/// face: it carries four short lines and is meant to be read without moving your head, so it is
+/// small enough that the cockpit is still the thing you are looking at.
+const BIG_WIDTH: f32 = 1.1;
+const MINI_WIDTH: f32 = 0.34;
 
 /// White on black, and neither is decoration.
 ///
-/// A caption sits over a starfield, a station's floodlights and the cockpit's
-/// own instruments. Text with nothing behind it is unreadable against half of
-/// those, which is why broadcast captioning has always put it on a box.
+/// A caption sits over a starfield, a station's floodlights and the cockpit's own instruments.
+/// Text with nothing behind it is unreadable against half of those, which is why broadcast
+/// captioning has always put it on a box.
 ///
-/// Not quite opaque: enough to read against anything, little enough that the
-/// Commander can still see what is behind it. Not quite white, because pure
-/// white on black rings at this contrast.
+/// Not quite opaque: enough to read against anything, little enough that the Commander can still
+/// see what is behind it. Not quite white, because pure white on black rings at this contrast.
 const BOX: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 200);
 const INK: egui::Color32 = egui::Color32::from_rgb(240, 240, 240);
 
 /// How large the caption text is drawn, in points.
 ///
-/// Sized so a full forty-two character line fills the layer's width rather than
-/// chosen by eye. The layer is [`PIXELS`] wide and drawn at the renderer's own
-/// scale, so this is the number that makes a standard line fit exactly.
+/// Sized so a full forty-two character line fills the layer's width rather than chosen by eye. The
+/// layer is [`PIXELS`] wide and drawn at the renderer's own scale, so this is the number that
+/// makes a standard line fit exactly.
 const TEXT: f32 = 26.0;
 
 /// Where the captions sit relative to the Commander's head, in metres.
 ///
-/// Below the middle and a little way out. Captions belong under what you are
-/// looking at rather than across it — this is a cockpit with a station in it,
-/// and text over the middle of the view is text in the way of flying.
+/// Below the middle and a little way out. Captions belong under what you are looking at rather
+/// than across it — this is a cockpit with a station in it, and text over the middle of the view
+/// is text in the way of flying.
 const AHEAD: f32 = 1.6;
 const BELOW: f32 = 0.45;
 
+/// How far away the panel is put when it is summoned, in metres.
+///
+/// Further than the captions, because it is read deliberately rather than glanced at, and a large
+/// surface close to the face is one you have to move your head across to read.
+const PANEL_AHEAD: f32 = 1.5;
+
 /// The size of the image captions are drawn into.
 ///
-/// Wide and short, because two lines of text is that shape. Drawing a square
-/// and using a quarter of it would cost memory and sharpness for nothing.
+/// Wide and short, because two lines of text is that shape. Drawing a square and using a quarter
+/// of it would cost memory and sharpness for nothing.
 const PIXELS: (u32, u32) = (1600, 260);
 
-/// Starts the caption layer.
+/// The size of the image the panel is drawn into.
 ///
-/// Returns immediately. Everything after this happens on its own thread, and
-/// failure there costs the headset and nothing else: the window, the voice and
-/// the turn carry on with no idea this exists.
-pub fn spawn(captions: Arc<Mutex<Captions>>) {
+/// The same shape as the window's own minimum, so the one widget tree lays out the same way in
+/// both places. A panel narrower than this puts the checklist and the conversation into a fight
+/// for the width, which is the thing the window's minimum size exists to prevent.
+const PANEL_PIXELS: (u32, u32) = (1900, 1200);
+
+/// The size of the image the mini panel is drawn into.
+///
+/// Not a crop of the big one and not the big one scaled. An overlay's text size in the headset
+/// comes out of its pixels and its width in metres together, and these two numbers are chosen so
+/// that a line on the mini panel subtends about what a line on the big one does — which is the
+/// whole point of a surface meant to be read without looking directly at it.
+const MINI_PIXELS: (u32, u32) = (640, 280);
+
+/// Starts the caption layer and the panel.
+///
+/// Returns immediately. Everything after this happens on its own thread, and failure there costs
+/// the headset and nothing else: the window, the voice and the turn carry on with no idea this
+/// exists.
+pub fn spawn(captions: Arc<Mutex<Captions>>, engine: Handle) {
     let started = std::thread::Builder::new()
         .name("ward-overlay".to_string())
-        .spawn(move || run(&captions));
+        .spawn(move || run(&captions, &engine));
 
     if let Err(e) = started {
-        tracing::warn!(target: "ward::vr", error = %e, "could not start the caption layer");
+        tracing::warn!(target: "ward::vr", error = %e, "could not start the headset layers");
     }
 }
 
-fn run(captions: &Arc<Mutex<Captions>>) {
-    // Said once. A Commander who does not use VR would otherwise get a line
-    // every five seconds for the whole session saying so.
+fn run(captions: &Arc<Mutex<Captions>>, engine: &Handle) {
+    // Said once. A Commander who does not use VR would otherwise get a line every five seconds for
+    // the whole session saying so.
     let mut complained = false;
 
     loop {
@@ -116,48 +155,74 @@ fn run(captions: &Arc<Mutex<Captions>>) {
         tracing::info!(target: "ward::vr", "headset found");
         complained = false;
 
-        if let Err(e) = show_captions(&session, captions) {
-            tracing::warn!(target: "ward::vr", error = %e, "the caption layer stopped");
+        if let Err(e) = serve(&session, captions, engine) {
+            tracing::warn!(target: "ward::vr", error = %e, "the headset layers stopped");
         }
 
-        // Dropping the session shuts OpenVR down, which is what makes going
-        // round again a fresh start rather than a second init on a runtime that
-        // already has one.
+        // Dropping the session shuts OpenVR down, which is what makes going round again a fresh
+        // start rather than a second init on a runtime that already has one.
         drop(session);
         std::thread::sleep(RETRY);
     }
 }
 
-/// Draws until something goes wrong or nobody is listening any more.
-fn show_captions(
+/// Draws both layers until something goes wrong or nobody is listening any more.
+fn serve(
     session: &crate::vr::Vr,
     captions: &Arc<Mutex<Captions>>,
+    engine: &Handle,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut renderer = crate::render::Renderer::new(PIXELS.0, PIXELS.1)?;
+    // The overlays first, and the reason is what this loop does when it fails. The key is what
+    // SteamVR knows an overlay by, and a second copy of Ward claiming it is how we learn one is
+    // already running - which is a thing that stays true for as long as that copy lives. Claiming
+    // the key after building a Vulkan device and two renderers meant every five second retry
+    // brought a device up and tore it down to find out something it could have asked first.
+    let caption_layer = session.create_overlay("dev.ward.captions", "Ward captions")?;
+
+    caption_layer.set_width(WIDTH)?;
+    caption_layer.follow_head(glam::Affine3A::from_translation(glam::Vec3::new(
+        0.0, -BELOW, -AHEAD,
+    )))?;
+    caption_layer.hide()?;
+
+    // Input is set up per mode rather than here, because the mouse scale is the drawn image's own
+    // pixels and the two modes are drawn at different sizes.
+    let panel_layer = session.create_overlay("dev.ward.panel", "Ward")?;
+    panel_layer.hide()?;
+
+    // Only once both keys are ours. One device for both layers, and that is a correctness
+    // requirement rather than a saving: OpenVR keeps its Vulkan state per process, so two devices
+    // submitting to the compositor corrupts it - which showed up as an access violation inside
+    // `vrclient_x64.dll` the first time a caption appeared while the panel was up.
+    let gpu = std::sync::Arc::new(crate::render::Gpu::new()?);
+
+    let mut caption_art = crate::render::Renderer::new(&gpu, PIXELS.0, PIXELS.1);
+    let mut panel_art = crate::render::Renderer::new(&gpu, PANEL_PIXELS.0, PANEL_PIXELS.1);
 
     tracing::info!(
         target: "ward::vr",
-        adapter = %renderer.adapter_info().name,
-        "drawing captions"
+        adapter = %gpu.adapter_info().name,
+        "drawing captions and the panel"
     );
 
-    // The key is what SteamVR knows this overlay by, and a second copy of Ward
-    // claiming it is how we learn one is already running.
-    let overlay = session.create_overlay("dev.ward.captions", "Ward captions")?;
+    let mut showing_caption = false;
+    let mut panel = Panel::default();
 
-    overlay.set_width(WIDTH)?;
-    overlay.follow_head(glam::Affine3A::from_translation(glam::Vec3::new(
-        0.0, -BELOW, -AHEAD,
-    )))?;
-    overlay.hide()?;
-
-    let mut visible = false;
+    // When the captions were last redrawn, so their slow pace does not set the loop's.
+    let mut drew_captions = Instant::now() - REDRAW;
 
     loop {
         let now = crate::diag::since_start();
 
-        // Held only long enough to read. The window thread writes to this
-        // whenever Ward says something, and it must never wait on a frame.
+        // The summoning key is read every pass, before anything decides whether to draw. It used
+        // to be read at whatever rate the loop happened to be running, which was ten times a
+        // second while the panel was hidden - and a key tapped and released inside a hundred
+        // milliseconds fell between two polls and did nothing at all. Reading the key is a
+        // syscall; drawing is the expensive part, and only that is paced below.
+        panel.summoned(session, &engine.view());
+
+        // Held only long enough to read. The window thread writes to this whenever Ward says
+        // something, and it must never wait on a frame.
         let showing = {
             let Ok(mut captions) = captions.lock() else {
                 return Ok(());
@@ -166,59 +231,573 @@ fn show_captions(
             captions.showing().cloned()
         };
 
-        let Some(caption) = showing else {
-            if visible {
-                overlay.hide()?;
-                visible = false;
+        // Captions change a few times a minute, so they are redrawn at their own slow pace rather
+        // than at the pace the loop now runs.
+        let caption_due = drew_captions.elapsed() >= REDRAW;
+
+        match showing {
+            Some(caption) if caption_due => {
+                drew_captions = Instant::now();
+                caption_art.draw(|ui| draw_caption(ui, &caption));
+
+                let Some(image) = caption_art.vulkan_image() else {
+                    return Err("the renderer produced no image OpenVR could read".into());
+                };
+
+                // SAFETY: the image belongs to the renderer above, which outlives this loop, and
+                // the compositor reads it rather than taking ownership. It is handed over after
+                // `draw` and before the next one starts, so nothing is writing to it while OpenVR
+                // reads.
+                unsafe { caption_layer.set_texture(&image) }?;
+
+                if !showing_caption {
+                    caption_layer.show()?;
+                    showing_caption = true;
+                }
             }
-            std::thread::sleep(REDRAW);
-            continue;
-        };
+            None if showing_caption => {
+                caption_layer.hide()?;
+                showing_caption = false;
+            }
+            // Either a caption that is already on screen and not due a redraw, or no caption and
+            // nothing showing. Both are nothing to do.
+            _ => {}
+        }
 
-        renderer.draw(|ui| draw_caption(ui, &caption));
+        panel.frame(session, &panel_layer, &mut panel_art, engine)?;
 
-        let Some(image) = renderer.vulkan_image() else {
+        // One steady pace, because the thing this loop must not miss is a key held for a tenth of
+        // a second. Nothing is drawn on a pass where nothing needs drawing: a hidden panel does no
+        // GPU work at all, and the captions have their own clock above. What this costs is a
+        // wake-up sixty times a second, which is a syscall and a comparison.
+        std::thread::sleep(POINTING);
+    }
+}
+
+/// Everything the panel is, between frames.
+#[derive(Default)]
+struct Panel {
+    mode: Mode,
+    local: crate::surface::Local,
+    /// Where it is in the room. Absent until it has been summoned once.
+    placed: Option<glam::Affine3A>,
+    /// Whether SteamVR currently believes it is on screen, so show and hide are called on the
+    /// change rather than every frame.
+    visible: bool,
+    /// What SteamVR has already been told about size and position, so the calls that change them
+    /// are made when something changes rather than sixty times a second.
+    applied_mode: Option<Mode>,
+    applied_place: Option<glam::Affine3A>,
+    /// What curvature SteamVR has already been told about, so a setting that has not moved is not
+    /// pushed at it sixty times a second.
+    applied_curve: Option<f32>,
+    /// Whether the trigger is down, which the renderer needs as a level and OpenVR reports as two
+    /// edges. It is also what carries the panel, because it is the only button that arrives.
+    pressed: bool,
+    /// Where the ray last was, in the image's own pixels, so a press knows what it landed on.
+    pointer: Option<(f32, f32)>,
+    /// The physical keyboard, read directly because a headset has no window focus to be given
+    /// keystrokes through.
+    keyboard: crate::keys::Keyboard,
+    /// Where the grab strip was drawn last frame, in the image's own pixels.
+    strip: Option<egui::Rect>,
+    /// Whether the last press landed on the strip along the top rather than on the interface.
+    ///
+    /// A panel that is entirely widgets has nowhere for a press to mean "pick this up", and asking
+    /// the toolkit whether it wants the pointer does not help: on a surface made only of widgets
+    /// the answer is always yes, so a grab could never start. So there is one strip that is not a
+    /// widget, and this remembers whether the press was on it.
+    on_strip: bool,
+    /// A hand that is holding the panel, and where it was when it took hold.
+    held: Option<Grab>,
+    /// The key that summons the panel, and what it last read — so the press is acted on and the
+    /// hold is not. Absent when the setting names a key Ward cannot resolve, which is a hotkey
+    /// that does nothing rather than one that fires constantly.
+    summon: Option<PushToTalk>,
+    /// Which key name `summon` was built from, so a Commander who changes the setting gets the new
+    /// key without restarting. In a headset a restart means taking it off.
+    summon_named: String,
+    summon_down: bool,
+    /// When the mode last changed on its own, so one gesture cannot fire twice.
+    settled: Option<Instant>,
+    /// What the last resize asked for, held until the texture behind it has actually been handed
+    /// over, so the answer is read when there is something to read.
+    asked_for: Option<String>,
+    /// Whether anything typed has ever arrived, said once and never with what.
+    typed_anything: bool,
+    /// Whether any controller has ever been seen, said once. A grab that does nothing is otherwise
+    /// indistinguishable from a grab that was not noticed, and the difference is the whole
+    /// diagnosis.
+    saw_controllers: bool,
+}
+
+/// A hand that has taken hold of the panel.
+#[derive(Clone, Copy)]
+struct Grab {
+    /// Which device is carrying it. A second hand pressing cannot take over from this one.
+    device: u32,
+    /// Where the panel sat in the hand's own space at the moment it was taken.
+    ///
+    /// Frozen once and multiplied through every frame after. That is what makes a carried panel
+    /// feel attached rather than dragged: it keeps the distance, the bearing and the angle it had
+    /// when it was caught, instead of snapping to some fixed place in front of the hand.
+    offset: glam::Affine3A,
+}
+
+/// The hand whose aim lands on the panel, nearest hit winning.
+///
+/// Asked of OpenVR rather than worked out here, so the answer agrees with the cursor SteamVR is
+/// already drawing. This only has to tell one hand from the other, which is a much easier question
+/// than where exactly the ray lands - the two hands are nowhere near each other.
+fn nearest_pointing<'a>(
+    hands: &'a [crate::vr::Controller],
+    layer: &crate::vr::Overlay<'_>,
+) -> Option<&'a crate::vr::Controller> {
+    hands
+        .iter()
+        .filter_map(|hand| {
+            let from = glam::Vec3::from(hand.aim.translation);
+            let along = hand.aim.transform_vector3(glam::Vec3::NEG_Z);
+            layer.hit_by(from, along).map(|hit| (hand, hit.distance))
+        })
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(hand, _)| hand)
+}
+
+impl Panel {
+    /// One frame of the panel: what was asked for, what is pointed at, and what to draw.
+    fn frame(
+        &mut self,
+        session: &crate::vr::Vr,
+        layer: &crate::vr::Overlay<'_>,
+        art: &mut crate::render::Renderer,
+        engine: &Handle,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let view = engine.view();
+
+        // Not summoned here. The loop does that every pass, before it decides whether anything
+        // needs drawing, because a key tapped between two draws is a key that did nothing.
+        self.gestured(session, layer);
+
+        if !self.mode.showing() {
+            if self.visible {
+                layer.hide()?;
+                self.visible = false;
+                self.applied_mode = None;
+                self.applied_place = None;
+            }
+
+            return Ok(());
+        }
+
+        self.settle(layer, art, view.settings.f32("panel curve", 0.0, 0.5))?;
+        self.pointed(layer, art);
+
+        let mode = self.mode;
+        let drawn = art.draw_with(|ui| crate::surface::show(ui, &view, &mut self.local, mode));
+
+        // Where the strip actually landed this frame, in the image's own pixels. Read from the
+        // tree rather than worked out from a constant, because the two modes put it in different
+        // places and a caller that guesses gets one of them wrong.
+        self.strip = drawn.strip.map(|rect| {
+            egui::Rect::from_min_max(
+                (rect.min.to_vec2() * crate::render::SCALE).to_pos2(),
+                (rect.max.to_vec2() * crate::render::SCALE).to_pos2(),
+            )
+        });
+
+        for intent in drawn.intents {
+            engine.tell(intent);
+        }
+
+        // After drawing, because whether anything wants typing is something the frame decides.
+        //
+        // The real keyboard first. It is read whether or not SteamVR's own is up, because a
+        // Commander at a desk with a headset on still has hands and a keyboard in front of them,
+        // and that is a shorter route to a folder path than picking the letters off a panel.
+        let typed = self.keyboard.typed(art.wants_typing());
+
+        if !typed.is_empty() && !self.typed_anything {
+            tracing::info!(target: "ward::vr", "typing is reaching the panel");
+            self.typed_anything = true;
+        }
+
+        for one in &typed {
+            art.clipboard(one);
+        }
+
+        // What a cut or a copy asked for, from the frame before this one. egui answers on the pass
+        // after the shortcut arrives, so this is always one frame behind and that is fine: nobody
+        // pastes faster than a sixtieth of a second after copying.
+        if let Some(text) = art.copied() {
+            crate::keys::clipboard::write(&text);
+        }
+
+        let Some(image) = art.vulkan_image() else {
             return Err("the renderer produced no image OpenVR could read".into());
         };
 
-        // SAFETY: the image belongs to the renderer above, which outlives this
-        // loop, and the compositor reads it rather than taking ownership. It is
-        // handed over after `draw` and before the next one starts, so nothing
-        // is writing to it while OpenVR reads.
-        unsafe { overlay.set_texture(&image) }?;
+        // SAFETY: the same contract as the caption layer above. The image belongs to a renderer
+        // that outlives this loop, and it is handed over between draws.
+        unsafe { layer.set_texture(&image) }?;
 
-        if !visible {
-            overlay.show()?;
-            visible = true;
+        if !self.visible {
+            layer.show()?;
+            self.visible = true;
         }
 
-        std::thread::sleep(REDRAW);
+        // Now that the compositor has the image, what it made of it. The pointer's reach comes out
+        // of the texture size and the width together, so a mode change that left either behind is
+        // a panel the ray can only touch part of.
+        if let Some(asked) = self.asked_for.take() {
+            tracing::info!(
+                target: "ward::vr",
+                mode = ?self.mode,
+                %asked,
+                got = %layer.extent(),
+                "panel resized"
+            );
+        }
+
+        Ok(())
     }
+
+    /// Tells SteamVR anything about size or position that has changed since last frame.
+    ///
+    /// Both are set on the change rather than every frame. They are cheap calls and this is not
+    /// about the cost — it is that a position pushed every frame would fight the one the
+    /// Commander is currently dragging it to, and the panel would stick to where it was summoned.
+    fn settle(
+        &mut self,
+        layer: &crate::vr::Overlay<'_>,
+        art: &mut crate::render::Renderer,
+        curve: f32,
+    ) -> Result<(), crate::vr::Error> {
+        if self.applied_mode != Some(self.mode) {
+            // Mini is smaller in the room as well as carrying less. Making it narrower without
+            // making it a different picture would be the panel scaled down, which is the thing
+            // mini is deliberately not.
+            let (pixels, width) = match self.mode {
+                Mode::Mini => (MINI_PIXELS, MINI_WIDTH),
+                _ => (PANEL_PIXELS, BIG_WIDTH),
+            };
+
+            // Let go before the image is replaced. OpenVR reads a texture it was handed until it
+            // is told otherwise, and `resize` drops the old one.
+            layer.forget_texture();
+            // Let go before the image is replaced. OpenVR reads a texture it was handed until it
+            // is told otherwise, and `resize` drops the old one.
+            layer.forget_texture();
+            art.resize(pixels.0, pixels.1);
+            // Told again, because the mouse scale is the image's own pixels and the image just
+            // changed. Skipped, the ray would land somewhere else entirely on the mini panel.
+            layer.take_input(pixels.0, pixels.1)?;
+            layer.set_width(width)?;
+            self.applied_mode = Some(self.mode);
+            // Reapplied with the size, because the two together are what the compositor bends.
+            self.applied_curve = None;
+
+            // Asked here and answered after the next texture is submitted. Reading it now says
+            // 0x0 every time, because `forget_texture` has just run and the new image does not
+            // exist yet - which is a measurement taken at the one moment there is nothing to
+            // measure, and it told us nothing four times before this comment existed.
+            self.asked_for = Some(format!("{}x{} at {width:.2}m", pixels.0, pixels.1));
+        }
+
+        if let Some(placed) = self.placed
+            && self.applied_place != Some(placed)
+        {
+            layer.place(placed)?;
+            self.applied_place = Some(placed);
+        }
+
+        // Read from the picture every frame and pushed only when it moves, so a Commander who
+        // changes it on the settings page sees the panel bend while they are looking at it rather
+        // than the next time Ward starts.
+        let curve = curve.clamp(0.0, 0.5);
+        if self
+            .applied_curve
+            .is_none_or(|had| (had - curve).abs() > f32::EPSILON)
+        {
+            layer.set_curvature(curve)?;
+            self.applied_curve = Some(curve);
+        }
+
+        Ok(())
+    }
+
+    /// Takes what the ray is doing and hands it to the toolkit.
+    fn pointed(&mut self, layer: &crate::vr::Overlay<'_>, art: &mut crate::render::Renderer) {
+        // The image's own height, because that is what the Y flip is measured against and the two
+        // modes are not the same size.
+        for event in layer.events(art.size().1) {
+            match event {
+                crate::vr::Event::Moved { x, y } => {
+                    self.pointer = Some((x, y));
+                    art.point_at(Some((x, y)));
+                }
+                crate::vr::Event::Button { down } => {
+                    // Where the press landed decides what it means, and only on the way down. A
+                    // release is the end of whatever the press started, wherever the ray has
+                    // wandered to since.
+                    if down {
+                        self.on_strip = match (self.strip, self.pointer) {
+                            (Some(strip), Some((x, y))) => strip.contains(egui::pos2(x, y)),
+                            _ => false,
+                        };
+                    }
+
+                    self.pressed = down;
+
+                    // A press on the strip is not a click. Handing it to the toolkit as well would
+                    // put focus somewhere and open the keyboard on a surface being carried.
+                    if !self.on_strip {
+                        art.press(down);
+                    }
+                }
+                crate::vr::Event::Scrolled { x, y } => art.scroll(x, y),
+                crate::vr::Event::Left => {
+                    art.point_at(None);
+                    // The button is not released here. egui keeps it down on purpose when the
+                    // pointer leaves, so that dragging a slider survives leaving the viewport, and
+                    // saying otherwise would end a drag every time the ray wobbled off the edge.
+                }
+            }
+        }
+    }
+
+    /// Opens or closes the panel because something asked for it.
+    ///
+    /// Two of the three ways in: what the engine was told by voice, and the hotkey. The third is
+    /// the gesture, which is below because it needs the controllers.
+    fn summoned(&mut self, session: &crate::vr::Vr, view: &crate::engine::View) {
+        // Asked for by voice. The engine counts requests rather than holding a mode, because it
+        // does not know whether a headset exists and must not have an opinion about one.
+        if view.panel_asks != self.local.answered_asks {
+            self.local.answered_asks = view.panel_asks;
+            self.change(view.panel_wanted, "asked out loud");
+        }
+
+        // Rebuilt only when the setting changes, because resolving a key name goes through the
+        // keyboard layout and there is no reason to do that sixty times a second.
+        let named = view.settings.string("panel key");
+        if named != self.summon_named {
+            self.summon = PushToTalk::on(&named);
+
+            if self.summon.is_none() {
+                tracing::warn!(
+                    target: "ward::vr",
+                    key = %named,
+                    "no such key, so the panel cannot be summoned by hotkey"
+                );
+            }
+
+            self.summon_named = named;
+        }
+
+        let down = self
+            .summon
+            .as_mut()
+            .is_some_and(|key| key.open(crate::diag::since_start()));
+
+        // The press, not the hold. A key read as held would toggle the panel sixty times a second
+        // for as long as a finger stayed on it.
+        if down && !self.summon_down {
+            self.change(self.mode.cycled(), "key");
+        }
+        self.summon_down = down;
+
+        // Placed the moment it is asked for rather than kept from last time, so it always arrives
+        // where the Commander is looking now. A panel that came back where it was an hour ago is
+        // one behind you.
+        if self.mode.showing() && self.placed.is_none() {
+            self.placed = Some(in_front_of(session));
+        }
+    }
+
+    /// Carries the panel while the trigger is held on it.
+    ///
+    /// **Moving it moves it, and does nothing else.** Carrying used to be able to change which
+    /// mode was showing and to throw the panel away, and neither survived contact: a surface that
+    /// changes into something else while being put somewhere is a surface nobody can put anywhere.
+    /// What mode is showing is asked for, by the key or out loud, and never inferred from how a
+    /// hand happened to move.
+    ///
+    /// **The trigger, not the grip.** An overlay application is told about the trigger, because
+    /// SteamVR delivers it as an ordinary mouse press on the overlay; it is told about no other
+    /// button unless it ships an input manifest naming one. So the button that was chosen first
+    /// was the one button that could never arrive, and the button that already worked - the one
+    /// that clicks the checkboxes - is the one that picks the panel up.
+    ///
+    /// **Which hand pressed is not in the event.** `trackedDeviceIndex` on an overlay mouse event
+    /// is the invalid index, so the press says where on the panel and never who. The hand is found
+    /// by casting each controller's aim at the overlay and taking the nearest hit, which only has
+    /// to tell one hand from the other - and the two hands are nowhere near each other.
+    fn gestured(&mut self, session: &crate::vr::Vr, layer: &crate::vr::Overlay<'_>) {
+        let Some(placed) = self.placed else {
+            return;
+        };
+
+        let hands = session.controllers();
+
+        // Said once, and only once there is something to say. The census is the whole diagnosis
+        // when there is nothing: "nothing connected" means pick a controller up, and anything else
+        // means they are there and something here is not seeing them.
+        if !self.saw_controllers {
+            match hands.is_empty() {
+                false => tracing::info!(
+                    target: "ward::vr",
+                    controllers = hands.len(),
+                    "controllers found, so the panel can be carried"
+                ),
+                true => tracing::info!(
+                    target: "ward::vr",
+                    connected = %session.census(),
+                    "no controllers to carry with yet"
+                ),
+            }
+
+            self.saw_controllers = true;
+        }
+
+        match self.held {
+            // Being carried. Only the hand that took it matters: a second hand pressing does not
+            // take it over, and that hand letting go puts it down wherever the other one is.
+            Some(grab) => {
+                let Some(hand) = hands.iter().find(|hand| hand.device == grab.device) else {
+                    return;
+                };
+
+                // Let go. It stays exactly where it was put.
+                if !self.pressed {
+                    self.held = None;
+                    return;
+                }
+
+                // The offset frozen at the grab, reapplied to where the hand is now. Position and
+                // orientation together, which is what makes it feel attached rather than dragged:
+                // it keeps the distance, the bearing and the angle it had when it was caught, and
+                // it tilts and twists with the wrist.
+                //
+                // Nothing re-faces it at the Commander while it is held. That was tried and it is
+                // wrong: a panel forced upright and square cannot be tilted to read from below or
+                // turned to sit at an angle, which is most of what moving one is for.
+                self.placed = Some(hand.aim * grab.offset);
+            }
+            // Not carried. A trigger held on the grab strip picks it up.
+            None => {
+                if !self.pressed || !self.on_strip {
+                    return;
+                }
+
+                let Some(hand) = nearest_pointing(&hands, layer) else {
+                    return;
+                };
+
+                self.held = Some(Grab {
+                    device: hand.device,
+                    offset: hand.aim.inverse() * placed,
+                });
+
+                tracing::info!(target: "ward::vr", device = hand.device, "panel taken hold of");
+            }
+        }
+    }
+
+    /// Asks for SteamVR's keyboard when something wants typing, and takes it away when nothing
+    /// does.
+    ///
+    /// The toolkit is the one that knows, so this follows it rather than guessing from what was
+    /// clicked. A box that took focus because Ward asked it to — the compose field re-focusing
+    /// itself after a question — opens the keyboard the same way one the Commander pointed at
+    /// does.
+    /// Moves to a mode, and does nothing if it is already there.
+    ///
+    /// The guard is what keeps one gesture from being read as several. A grab is held across many
+    /// frames and a flick is a hand that stays fast for a tenth of a second, so acting on every
+    /// frame that matches would open and close the panel repeatedly from one movement.
+    fn change(&mut self, to: Mode, why: &'static str) {
+        if self.mode == to {
+            return;
+        }
+
+        // Forgotten on the way out, so the next summon places it in front of wherever the
+        // Commander is then rather than where they were.
+        if to == Mode::Gone {
+            self.placed = None;
+            self.held = None;
+        }
+
+        // Why, because two of these are indistinguishable without it: a panel pulled open and a
+        // panel opened by the key both arrive here as Mini to Big, and reading a log full of them
+        // says nothing about whether the gesture works.
+        tracing::info!(target: "ward::vr", from = ?self.mode, to = ?to, %why, "panel");
+        self.mode = to;
+        self.settled = Some(Instant::now());
+    }
+}
+
+/// A pose a little way in front of the Commander, turned to face them.
+fn in_front_of(session: &crate::vr::Vr) -> glam::Affine3A {
+    let Some(head) = session.head() else {
+        // No headset pose yet. Put it where a headset would be if there were one, so the panel
+        // exists and can be found rather than being nowhere at all.
+        return glam::Affine3A::from_translation(glam::Vec3::new(0.0, 1.6, -PANEL_AHEAD));
+    };
+
+    // Along the direction being looked, rather than at a fixed point in the room. Negative Z is
+    // forward for every tracked device in OpenVR.
+    let forward = -glam::Vec3::from(head.matrix3.z_axis);
+    let at = glam::Vec3::from(head.translation) + forward * PANEL_AHEAD;
+
+    glam::Affine3A::from_rotation_translation(facing(session, at), at)
+}
+
+/// Which way something at `at` has to be turned to face the Commander.
+///
+/// Upright rather than tilted, deliberately. A panel that pitched to face a head looking down at
+/// the radar would be one leaning back at the sky, and text on it reads worse than text on
+/// something level.
+fn facing(session: &crate::vr::Vr, at: glam::Vec3) -> glam::Quat {
+    let Some(head) = session.head() else {
+        return glam::Quat::IDENTITY;
+    };
+
+    let head_at = glam::Vec3::from(head.translation);
+    let away = at - head_at;
+    let flat = glam::Vec3::new(away.x, 0.0, away.z);
+
+    // Directly above or below the head, where there is no direction to turn towards. Left as it
+    // was rather than snapped to an arbitrary bearing.
+    if flat.length_squared() < f32::EPSILON {
+        return glam::Quat::IDENTITY;
+    }
+
+    // The overlay's own forward is negative Z, so it has to be turned to point back the way it
+    // came from.
+    glam::Quat::from_rotation_arc(glam::Vec3::NEG_Z, flat.normalize())
 }
 
 /// One frame of caption.
 ///
-/// White text on a black box, which is not a style choice. A caption sits over
-/// a starfield, a station's floodlights and a cockpit's own instruments, and
-/// text with nothing behind it is unreadable against half of them. The box is
-/// what broadcast captioning has always used, for the same reason.
+/// White text on a black box, which is not a style choice. A caption sits over a starfield, a
+/// station's floodlights and a cockpit's own instruments, and text with nothing behind it is
+/// unreadable against half of them. The box is what broadcast captioning has always used, for the
+/// same reason.
 ///
-/// The box is drawn around the text rather than filling the layer, so an
-/// overlay with one short line is one short bar rather than a black slab with a
-/// sentence in the corner of it.
+/// The box is drawn around the text rather than filling the layer, so an overlay with one short
+/// line is one short bar rather than a black slab with a sentence in the corner of it.
 ///
-/// No border, no title, no controls. There is nothing here to interact with,
-/// and anything that looks interactive in a caption layer is a lie — the layer
-/// does not take input at all.
+/// No border, no title, no controls. There is nothing here to interact with, and anything that
+/// looks interactive in a caption layer is a lie — the layer does not take input at all.
 pub(crate) fn draw_caption(ui: &mut egui::Ui, caption: &crate::captions::Caption) {
-    // An area rather than a layout, and that is the whole of the fix for a box
-    // that was drawing four lines tall for two lines of words. A layout is
-    // handed the space it sits in - the entire layer, here - and a frame around
-    // it grows to match, so the black box was the overlay rather than the
-    // caption. An area is measured by what is put in it.
+    // An area rather than a layout, and that is the whole of the fix for a box that was drawing
+    // four lines tall for two lines of words. A layout is handed the space it sits in - the entire
+    // layer, here - and a frame around it grows to match, so the black box was the overlay rather
+    // than the caption. An area is measured by what is put in it.
     //
-    // Anchored to the bottom, so a two line caption grows upward and the last
-    // line stays where the eye already is.
+    // Anchored to the bottom, so a two line caption grows upward and the last line stays where the
+    // eye already is.
     egui::Area::new(egui::Id::new("ward-caption"))
         .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -4.0))
         .interactable(false)
@@ -233,23 +812,21 @@ pub(crate) fn draw_caption(ui: &mut egui::Ui, caption: &crate::captions::Caption
                 })
                 .corner_radius(2)
                 .show(ui, |ui| {
-                    // No gap between the two lines of one caption. The box is
-                    // as tall as the words and no taller.
+                    // No gap between the two lines of one caption. The box is as tall as the words
+                    // and no taller.
                     ui.spacing_mut().item_spacing.y = 0.0;
 
-                    // Never wrap. The lines arrive already broken to the
-                    // caption standard, so there is nothing left to decide -
-                    // and letting the toolkit decide it again is a loop that
-                    // eats itself: an area is as wide as its contents, a
-                    // narrower area wraps the text, wrapped text is more lines,
-                    // more lines is a narrower and taller box, and the caption
-                    // reflows in front of the Commander until it is four lines
-                    // of ribbon down the middle of the cockpit.
+                    // Never wrap. The lines arrive already broken to the caption standard, so
+                    // there is nothing left to decide - and letting the toolkit decide it again is
+                    // a loop that eats itself: an area is as wide as its contents, a narrower area
+                    // wraps the text, wrapped text is more lines, more lines is a narrower and
+                    // taller box, and the caption reflows in front of the Commander until it is
+                    // four lines of ribbon down the middle of the cockpit.
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
 
                     for (at, line) in caption.lines.iter().enumerate() {
-                        // The speaker is named once, on the first line, and
-                        // never repeated down a caption that happens to wrap.
+                        // The speaker is named once, on the first line, and never repeated down a
+                        // caption that happens to wrap.
                         let text = match (at, caption.speaker) {
                             (0, Some(who)) => format!("{who}: {line}"),
                             _ => line.clone(),
@@ -267,14 +844,13 @@ mod tests {
 
     /// Draws a caption and measures the box it drew.
     ///
-    /// Permanently ignored: it needs a Vulkan device. Run it when something
-    /// about the caption looks wrong. "The box is too tall" cannot be measured
-    /// through a headset and can be measured exactly here - it was four lines
-    /// tall for two lines of words, and the layout was the reason.
+    /// Permanently ignored: it needs a Vulkan device. Run it when something about the caption
+    /// looks wrong. "The box is too tall" cannot be measured through a headset and can be measured
+    /// exactly here - it was four lines tall for two lines of words, and the layout was the
+    /// reason.
     ///
-    /// The bitmap is for geometry, not for color: the transparent parts are
-    /// filled with a flat grey that stands in for a cockpit, so contrast in the
-    /// file is not contrast in the headset.
+    /// The bitmap is for geometry, not for color: the transparent parts are filled with a flat
+    /// grey that stands in for a cockpit, so contrast in the file is not contrast in the headset.
     ///
     /// ```text
     /// cargo test caption_to_look_at -- --ignored --nocapture
@@ -282,7 +858,8 @@ mod tests {
     #[test]
     #[ignore = "needs a Vulkan device"]
     fn caption_to_look_at() {
-        let mut renderer = crate::render::Renderer::new(PIXELS.0, PIXELS.1).expect("no renderer");
+        let gpu = std::sync::Arc::new(crate::render::Gpu::new().expect("no Vulkan device"));
+        let mut renderer = crate::render::Renderer::new(&gpu, PIXELS.0, PIXELS.1);
 
         let caption = crate::captions::Caption {
             lines: vec![
@@ -292,17 +869,18 @@ mod tests {
             speaker: None,
         };
 
-        // Twice. An anchored area is placed from the size it had last frame,
-        // so the first pass has nothing to measure and the second is what the
-        // Commander sees.
-        renderer.draw(|ui| draw_caption(ui, &caption));
-        renderer.draw(|ui| draw_caption(ui, &caption));
+        // Settled rather than drawn twice. Two passes are enough to place an anchored area from
+        // the size it had last frame, and not enough to outlast the toolkit's fade - so a
+        // two-frame read measures the geometry correctly and lies about every color in it.
+        for _ in 0..SETTLE_FRAMES {
+            renderer.draw(|ui| draw_caption(ui, &caption));
+        }
 
         let pixels = renderer.read_back();
         let (width, height) = (PIXELS.0 as usize, PIXELS.1 as usize);
 
-        // Where the box actually is, measured rather than guessed: the first
-        // and last row with anything drawn on it.
+        // Where the box actually is, measured rather than guessed: the first and last row with
+        // anything drawn on it.
         let opaque = |row: usize| (0..width).any(|x| pixels[(row * width + x) * 4 + 3] > 8);
         let top = (0..height).find(|r| opaque(*r));
         let bottom = (0..height).rev().find(|r| opaque(*r));
@@ -324,6 +902,99 @@ mod tests {
         println!("written to {}", out.display());
     }
 
+    /// Draws the panel and writes it out, so what the headset shows can be looked at flat.
+    ///
+    /// Permanently ignored for the same reason as the caption above. This is the only way to see
+    /// the panel's layout without putting a headset on, and layout is most of what goes wrong: a
+    /// checklist that pushes the conversation into a strip looks fine in a window at 980 points
+    /// and wrong at [`PANEL_PIXELS`].
+    ///
+    /// ```text
+    /// cargo test panel_to_look_at -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a Vulkan device"]
+    fn panel_to_look_at() {
+        // One device, two layers, exactly as the running overlay does it — because that is the
+        // arrangement that crashed OpenVR when it was two devices, and a test that builds it the
+        // easy way would be testing something the application never does.
+        let gpu = std::sync::Arc::new(crate::render::Gpu::new().expect("no Vulkan device"));
+        let mut renderer = crate::render::Renderer::new(&gpu, PANEL_PIXELS.0, PANEL_PIXELS.1);
+
+        let view = crate::engine::View {
+            key_stored: true,
+            history: vec![
+                crate::anthropic::Message {
+                    role: crate::anthropic::Role::User,
+                    text: "how far to Colonia".to_string(),
+                },
+                crate::anthropic::Message {
+                    role: crate::anthropic::Role::Assistant,
+                    text: "Twenty two thousand light years, Commander. About four \
+                           hundred jumps in this ship."
+                        .to_string(),
+                },
+            ],
+            ..crate::engine::View::default()
+        };
+
+        // A list with something left on it, because the next thing to do is one of the three
+        // things the mini panel carries and an empty one would show nothing at all.
+        let view = crate::engine::View {
+            panels: vec![crate::shown::Shown::List {
+                title: "Checklist".to_string(),
+                rows: vec![
+                    crate::shown::Row {
+                        text: "buy tritium at Deciat".to_string(),
+                        done: true,
+                    },
+                    crate::shown::Row {
+                        text: "refuel at Jameson Memorial".to_string(),
+                        done: false,
+                    },
+                ],
+            }],
+            ..view
+        };
+
+        let mut local = crate::surface::Local::default();
+
+        // Enough frames for the toolkit to settle, not two. An anchored area is placed from the
+        // size it had last frame, which takes two - but egui also fades a new area in over about
+        // a tenth of a second, and a two-frame render catches the panel at the start of that. It
+        // reads as a contrast bug that is not in the panel at all.
+        for _ in 0..SETTLE_FRAMES {
+            renderer.draw(|ui| {
+                crate::surface::show(ui, &view, &mut local, Mode::Big);
+            });
+        }
+
+        let out = std::env::temp_dir().join("ward-panel.bmp");
+        write_bitmap(&out, &renderer.read_back(), PANEL_PIXELS.0, PANEL_PIXELS.1);
+        println!("written to {}", out.display());
+
+        // The mini mode, at its own size. Drawn from the same picture and the same tree, so what
+        // this shows is the reduction rather than a second design - and the thing worth looking
+        // at is whether four short lines still read at a third of a metre.
+        renderer.resize(MINI_PIXELS.0, MINI_PIXELS.1);
+
+        for _ in 0..SETTLE_FRAMES {
+            renderer.draw(|ui| {
+                crate::surface::show(ui, &view, &mut local, Mode::Mini);
+            });
+        }
+
+        let small = std::env::temp_dir().join("ward-panel-mini.bmp");
+        write_bitmap(&small, &renderer.read_back(), MINI_PIXELS.0, MINI_PIXELS.1);
+        println!("written to {}", small.display());
+    }
+
+    /// How many frames to draw before reading one back.
+    ///
+    /// At the toolkit's default of a sixtieth of a second per frame this is a third of a second,
+    /// which outlasts every fade and settles every anchored area.
+    const SETTLE_FRAMES: usize = 20;
+
     /// A bitmap, because it needs no library and any viewer opens one.
     #[cfg(test)]
     fn write_bitmap(path: &std::path::Path, rgba: &[u8], width: u32, height: u32) {
@@ -344,9 +1015,9 @@ mod tests {
             out.extend_from_slice(&0u32.to_le_bytes());
         }
 
-        // Bitmaps run bottom to top, and the caption is drawn over whatever is
-        // behind it - so the transparent parts are filled with a mid grey to
-        // stand in for a cockpit rather than reading as white.
+        // Bitmaps run bottom to top, and the caption is drawn over whatever is behind it - so the
+        // transparent parts are filled with a mid grey to stand in for a cockpit rather than
+        // reading as white.
         for y in (0..height).rev() {
             let mut written = 0;
             for x in 0..width {

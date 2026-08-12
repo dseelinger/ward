@@ -6,6 +6,7 @@
 
 - [Auto-honk](capabilities/honk.md)
 - [Checklist](capabilities/checklist.md)
+- [The panel](capabilities/panel.md)
 - [Version](capabilities/version.md)
 
 # Behind it

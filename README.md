@@ -3,33 +3,39 @@
 A voice companion for Elite Dangerous. Hold a key, say what you want, and hear the answer —
 in the cockpit, in the headset, without tabbing out of the game.
 
-## Ward does not run yet
+## Getting it
 
-No release has been published yet. The repository is at its beginning and is being built in
-the open, so the issue tracker is currently more informative than the code.
+**0.1.0 is out.** It is early, and it is enough to fly with. The installer is on the
+[releases page](https://github.com/dseelinger/ward/releases): per-user, so no administrator
+and no elevation prompt, and everything Ward writes stays in one folder beside the program
+that an upgrade leaves alone.
 
-When there is one, it will be a per-user installer on the
-[releases page](https://github.com/dseelinger/ward/releases): no administrator, no elevation
-prompt, and everything Ward writes kept in one folder beside the program that an upgrade
-leaves alone. Ward ships unsigned, so Windows will show a SmartScreen dialog the first time.
-Each release publishes a `SHA256SUMS.txt`; checking the installer against it is the way to
-know you have the file the release meant to publish.
+Ward ships unsigned, so Windows will show a SmartScreen dialog the first time. Each release
+publishes a `SHA256SUMS.txt`; checking the installer against it is the way to know you have
+the file the release meant to publish.
 
-If you arrived looking for something to use, the first release to try will be **0.1.0**, and
-the first release worth recommending will be **1.0.0**. Both are milestones on the tracker.
+You will need an Anthropic API key, which Ward asks for on first run and stores encrypted for
+your Windows account. The first release worth recommending will be **1.0.0**, and the
+repository is still being built in the open, so the
+[issue tracker](https://github.com/dseelinger/ward/milestones) says more about where this is
+going than the code does.
 
-## What it is meant to do
+## What it does
 
-Answer questions about where you are and what you are flying, from what the game writes to
+Answers questions about where you are and what you are flying, from what the game writes to
 disk — so an answer is grounded in your actual session rather than in what a language model
 remembers about the game. When Ward cannot reach something it needs, it says so plainly
 instead of guessing.
 
-Press keys on your behalf for the things that are timing and tedium: the discovery scanner on
-arrival, landing gear, lights, power distribution, panels and fire groups.
+Presses keys on your behalf for the things that are timing and tedium. Today that is the
+discovery scanner on arrival, and it is off until you switch it on, because automation that
+presses your fire key should be something you chose. Landing gear, lights, power distribution,
+panels and fire groups are the same mechanism and are not built yet.
 
-Show all of this on a panel you can read inside VR, with captions for anything spoken, so the
-headset never has to come off.
+Shows all of this on a panel inside the headset, with captions for anything spoken, so it
+never has to come off. The panel is the window — one interface drawn in two places, so the
+desktop cannot do anything the headset cannot. Summon it by voice, by hotkey, or by reaching
+out and taking hold of it.
 
 ### Where the line is
 
@@ -42,7 +48,7 @@ target. That is a boundary set by Frontier's terms, not a gap waiting to be fill
 
 | Milestone | What it means |
 |---|---|
-| [0.1.0](https://github.com/dseelinger/ward/milestone/1) | The first installable release. A voice and text turn, journal awareness, VR, automatic honk, a checklist, settings, and an installer. |
+| [0.1.0](https://github.com/dseelinger/ward/milestone/1) | The first installable release, and it is out. A voice and text turn, journal awareness, VR, automatic honk, a checklist, settings, and an installer. |
 | [1.0.0](https://github.com/dseelinger/ward/milestone/2) | The first release that ships without a caveat attached. |
 | [Future](https://github.com/dseelinger/ward/milestone/3) | Wanted, not scheduled. |
 

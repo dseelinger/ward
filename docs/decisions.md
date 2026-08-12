@@ -52,24 +52,43 @@ depended on one depended on another product's private and undocumented surface.
 No second interface, and no browser embedded to draw one. The window cannot be
 more capable than the headset, because there is one implementation of both.
 
-> accepted — nothing checks that a second surface is not added. It would be a
-> large and obvious change rather than a drift, and a check that fires on
-> nothing is one people learn to ignore.
+> open — one implementation holds, and equal capability does not. There is one widget tree and
+> both surfaces draw it, so no second interface exists and none can appear by drift. But the
+> headset has no way to type: reading the keyboard also typed into the game, taking it from the
+> game could leave a Commander locked out of their own keys, and SteamVR's own keyboard was not
+> worth having. So the settings page is drawn in the headset with text boxes nobody can fill,
+> which is the window being more capable than the headset — the exact thing this decision denies.
+> Either that is fixed or this decision is rewritten to say the headset does not carry settings.
+> [#133](https://github.com/dseelinger/ward/issues/133)
 
 ## D5 — Three layers in the headset
 
 Captions on their own layer, output only and ephemeral. A small panel that can
 be glanced at. A full panel at parity with the window.
 
-> open — captions ship; the panels do not.
-> [#13](https://github.com/dseelinger/ward/issues/13)
+> open — all three ship and the third is not what this says it is. Captions are their own
+> overlay, output only and following the head; the panel is a second overlay placed in the room,
+> and mini and big are two modes of it rather than two surfaces. What is not true is "at parity
+> with the window": the big panel cannot be typed into, so the settings page is on it and cannot
+> be completed there. The layer count is not what is open here — the claim about the third layer
+> is. [#133](https://github.com/dseelinger/ward/issues/133)
 
-## D6 — The big panel answers to voice, hotkey and controller
+## D6 — The panel is summoned two ways, and positioned by hand
 
-Summoned and dismissed three ways, because a Commander in a headset should
-never have to reach for the one that is inconvenient.
+Summoned and dismissed by voice and by a key, so a Commander with their hands on the stick and
+one with a headset on but nothing to say each have a way in. The controllers position it and do
+not summon it.
 
-> open — [#13](https://github.com/dseelinger/ward/issues/13)
+Three ways was the original decision, with the controller as the third. It was built and it was
+wrong in use: a surface that changes what it is showing, or disappears, because of how a hand
+moved while putting it somewhere is a surface nobody can put anywhere. Moving a thing moves it.
+What is showing is asked for, and never inferred from a gesture that was aimed at something else.
+
+> accepted — both routes are built and neither is fully testable. Voice goes through an ordinary
+> capability, and its tools are tested. The hotkey is a setting, and a test holds it to a key
+> name Ward can actually resolve, because a default it cannot resolve is a hotkey that silently
+> never fires. Whether either actually reaches a headset is held by the manual suite and by
+> nothing else, because it needs a headset.
 
 ## D7 — Reachable without a microphone or a speaker
 
@@ -470,12 +489,13 @@ answer once hid four installable releases behind a confident green. Installs on
 the way out, so an installer window never appears over the game. Askable and
 actionable by voice.
 
-> open — two of the four. The three-way answer is built and tested, and it
-> installs on the way out rather than over the game. It is visible in the
-> window and not yet in the headset, which waits on the panel that will carry
-> it; and it cannot be asked for by voice, which wants the update state
-> reachable from a capability and is the piece that is genuinely unbuilt rather
-> than merely blocked.
+> open — three of the four. The three-way answer is built and tested, and it installs on the
+> way out rather than over the game. It is now visible in the headset as well as the window,
+> because the panel that was blocking it exists and draws the same notice from the same picture
+> — on the big panel where the window has it, and on the mini one whenever there is anything to
+> say. What remains is that it cannot be asked for by voice, which wants the update state
+> reachable from a capability and is the piece that is genuinely unbuilt rather than merely
+> blocked.
 > [#126](https://github.com/dseelinger/ward/issues/126)
 
 ## D45 — Three rules of repository discipline, and no more
